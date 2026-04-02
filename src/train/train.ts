@@ -1,0 +1,245 @@
+import * as THREE from 'three';
+import { createLocomotive } from './locomotive';
+import { createCarriage } from './carriage';
+import { InputManager } from '../core/input';
+import { TrackManager, TrackPosition } from '../world/trackManager';
+
+export interface TrainState {
+  position: THREE.Vector3;
+  direction: THREE.Vector3;
+  speed: number;
+  trackPosition: TrackPosition;
+}
+
+interface SmokeParticle {
+  mesh: THREE.Mesh;
+  life: number;
+  maxLife: number;
+  velocity: THREE.Vector3;
+}
+
+export class TrainController {
+  readonly group: THREE.Group;
+  private locomotiveWheels: THREE.Object3D[];
+  private carriageWheels: THREE.Object3D[];
+  private speed = 0.15;
+  private targetSpeed = 0.15;
+  private trackPos: TrackPosition = { segmentIndex: 0, localT: 0 };
+
+  // Carriage offsets in world units (arc-length distance behind locomotive)
+  private readonly carriageOffsets: number[] = [6, 12];
+
+  // Smoke particle system
+  private smokeParticles: SmokeParticle[] = [];
+  private smokePool: THREE.Mesh[] = [];
+  private readonly SMOKE_POOL_SIZE = 30;
+  private smokeSpawnTimer = 0;
+  private chimneyWorldPos: THREE.Vector3;
+  private locomotiveGroup: THREE.Group;
+
+  // Headlight
+  private headlightSpot: THREE.SpotLight;
+
+  constructor(scene: THREE.Scene) {
+    this.group = new THREE.Group();
+    this.locomotiveWheels = [];
+    this.carriageWheels = [];
+
+    // Locomotive
+    const loco = createLocomotive();
+    this.group.add(loco.group);
+    this.locomotiveWheels = loco.wheels;
+    this.locomotiveGroup = loco.group;
+    this.chimneyWorldPos = loco.chimneyWorldPos;
+
+    // Carriages
+    const carriageConfigs: [number, number][] = [
+      [0x2266aa, 0],
+      [0x22aa66, 0],
+    ];
+    for (const [color] of carriageConfigs) {
+      const carriage = createCarriage(color, 0);
+      this.group.add(carriage.group);
+      this.carriageWheels.push(...carriage.wheels);
+    }
+
+    scene.add(this.group);
+
+    // Initialize smoke particle pool
+    const smokeMat = new THREE.MeshStandardMaterial({
+      color: 0xcccccc,
+      transparent: true,
+      opacity: 0.6,
+      depthWrite: false,
+    });
+    for (let i = 0; i < this.SMOKE_POOL_SIZE; i++) {
+      const mesh = new THREE.Mesh(new THREE.SphereGeometry(0.08, 6, 4), smokeMat.clone());
+      mesh.visible = false;
+      scene.add(mesh);
+      this.smokePool.push(mesh);
+    }
+
+    // Headlight spotlight
+    this.headlightSpot = new THREE.SpotLight(0xffffdd, 0, 30, Math.PI / 6, 0.5, 1);
+    this.headlightSpot.castShadow = false;
+    scene.add(this.headlightSpot);
+    scene.add(this.headlightSpot.target);
+  }
+
+  update(
+    dt: number,
+    input: InputManager,
+    trackManager: TrackManager,
+    dayTime?: number,
+  ): TrainState {
+    // Speed controls (in world units per frame)
+    if (input.keys['KeyW'] || input.keys['ArrowUp']) {
+      this.targetSpeed = Math.min(this.targetSpeed + 0.005, 0.8);
+    }
+    if (input.keys['KeyS'] || input.keys['ArrowDown']) {
+      this.targetSpeed = Math.max(this.targetSpeed - 0.005, 0);
+    }
+
+    this.speed = THREE.MathUtils.lerp(this.speed, this.targetSpeed, 0.02);
+
+    // Advance position along track
+    this.trackPos = trackManager.advance(this.trackPos, this.speed);
+
+    // Position locomotive
+    const locoPos = trackManager.getPointAt(this.trackPos);
+    const locoTangent = trackManager.getTangentAt(this.trackPos);
+    const locoGroup = this.group.children[0];
+    locoGroup.position.copy(locoPos);
+    locoGroup.lookAt(locoPos.clone().add(locoTangent));
+
+    // Position carriages by walking back along track
+    for (let i = 0; i < this.carriageOffsets.length; i++) {
+      const carriageGroup = this.group.children[i + 1];
+      const carriagePos = trackManager.walkBack(this.trackPos, this.carriageOffsets[i]);
+      const pos = trackManager.getPointAt(carriagePos);
+      const tangent = trackManager.getTangentAt(carriagePos);
+      carriageGroup.position.copy(pos);
+      carriageGroup.lookAt(pos.clone().add(tangent));
+    }
+
+    // Wheel rotation
+    const wheelRot = this.speed * 2;
+    for (const w of this.locomotiveWheels) w.rotation.x += wheelRot;
+    for (const w of this.carriageWheels) w.rotation.x += wheelRot;
+
+    const position = locoPos;
+    const direction = locoTangent;
+
+    // Update smoke particles
+    this.updateSmoke(dt, direction);
+
+    // Update headlight
+    this.updateHeadlight(position, direction, dayTime);
+
+    return { position, direction, speed: this.speed, trackPosition: this.trackPos };
+  }
+
+  private updateSmoke(dt: number, direction: THREE.Vector3): void {
+    const chimneyLocal = this.chimneyWorldPos.clone();
+    const chimneyWorld = chimneyLocal.applyMatrix4(this.locomotiveGroup.matrixWorld);
+
+    const spawnRate = this.speed > 0.01 ? 0.03 + (1 - this.speed / 0.8) * 0.1 : 999;
+    this.smokeSpawnTimer += dt;
+
+    if (this.smokeSpawnTimer >= spawnRate && this.speed > 0.005) {
+      this.smokeSpawnTimer = 0;
+      this.spawnSmokeParticle(chimneyWorld, direction);
+    }
+
+    for (let i = this.smokeParticles.length - 1; i >= 0; i--) {
+      const p = this.smokeParticles[i];
+      p.life += dt;
+      const t = p.life / p.maxLife;
+
+      if (t >= 1) {
+        p.mesh.visible = false;
+        this.smokeParticles.splice(i, 1);
+        continue;
+      }
+
+      p.mesh.position.add(p.velocity.clone().multiplyScalar(dt));
+
+      let scale: number;
+      if (t < 0.3) {
+        scale = THREE.MathUtils.lerp(0.5, 1.5, t / 0.3);
+      } else {
+        scale = THREE.MathUtils.lerp(1.5, 0.2, (t - 0.3) / 0.7);
+      }
+      p.mesh.scale.setScalar(scale);
+
+      const mat = p.mesh.material as THREE.MeshStandardMaterial;
+      mat.opacity = THREE.MathUtils.lerp(0.5, 0, t);
+
+      const grey = THREE.MathUtils.lerp(0.8, 0.5, t);
+      mat.color.setRGB(grey, grey, grey);
+    }
+  }
+
+  private spawnSmokeParticle(chimneyWorld: THREE.Vector3, direction: THREE.Vector3): void {
+    const available = this.smokePool.find(
+      (m) => !this.smokeParticles.some((p) => p.mesh === m),
+    );
+    if (!available) return;
+
+    available.visible = true;
+    available.position.copy(chimneyWorld);
+    available.scale.setScalar(0.5);
+
+    const mat = available.material as THREE.MeshStandardMaterial;
+    mat.opacity = 0.5;
+    mat.color.setRGB(0.85, 0.85, 0.85);
+
+    const speedFactor = this.speed / 0.8;
+    const velocity = new THREE.Vector3(
+      (Math.random() - 0.5) * 0.3,
+      1.5 + Math.random() * 0.5,
+      (Math.random() - 0.5) * 0.3,
+    );
+    velocity.add(direction.clone().multiplyScalar(-2 * speedFactor));
+
+    this.smokeParticles.push({
+      mesh: available,
+      life: 0,
+      maxLife: 1.5 + Math.random() * 1.0,
+      velocity,
+    });
+  }
+
+  private updateHeadlight(
+    position: THREE.Vector3,
+    direction: THREE.Vector3,
+    dayTime?: number,
+  ): void {
+    if (dayTime === undefined) {
+      this.headlightSpot.intensity = 0;
+      return;
+    }
+
+    let nightFactor: number;
+    if (dayTime < 0.2) {
+      nightFactor = 1.0;
+    } else if (dayTime < 0.3) {
+      nightFactor = 1.0 - (dayTime - 0.2) / 0.1;
+    } else if (dayTime < 0.7) {
+      nightFactor = 0;
+    } else if (dayTime < 0.8) {
+      nightFactor = (dayTime - 0.7) / 0.1;
+    } else {
+      nightFactor = 1.0;
+    }
+
+    this.headlightSpot.intensity = nightFactor * 5;
+
+    const headlightPos = position.clone().add(direction.clone().multiplyScalar(1.5));
+    headlightPos.y += 1.6;
+    this.headlightSpot.position.copy(headlightPos);
+
+    const targetPos = headlightPos.clone().add(direction.clone().multiplyScalar(15));
+    this.headlightSpot.target.position.copy(targetPos);
+  }
+}

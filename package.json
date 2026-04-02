@@ -1,0 +1,23 @@
+{
+  "name": "train-travel",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "three": "^0.170.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/three": "^0.170.0",
+    "eslint": "^10.1.0",
+    "typescript": "^5.7.0",
+    "typescript-eslint": "^8.58.0",
+    "vite": "^6.0.0"
+  }
+}
