@@ -1,7 +1,8 @@
 import * as THREE from 'three';
-import { getBiomeAtDistance, getBiomeWeightsAtDistance, BIOME_COLORS, BIOME_HEIGHT } from './biome';
-import { fbm, noise2D } from '../utils/noise';
+import { getBiomeAtDistance, getBiomeWeightsAtDistance, BIOME_COLORS, BIOME_HEIGHT, BiomeWeight } from './biome';
+import { terrainFbm, noise2D } from '../utils/noise';
 import { TrackSegment } from './trackSegment';
+import { createTerrainMaterial } from './terrainShader';
 
 // Terrain adaptation thresholds
 const HEIGHT_DIFF_THRESHOLD = 5; // meters — beyond this, use bridge or tunnel
@@ -13,27 +14,127 @@ const TUNNEL_MIN_LENGTH = 10; // minimum continuous length (meters) to qualify a
 const TUNNEL_RADIUS = 5; // radius of tunnel tube
 const TUNNEL_EXTENSION = 8; // meters to extend tunnel beyond mountain surface on each end
 
+// Multi-resolution terrain constants
+const NEAR_WIDTH = 80; // must be >= DEFORM_RADIUS to avoid seam artifacts
+const NEAR_SAMPLES_ACROSS = 60;
+const FAR_INNER = 80; // must match NEAR_WIDTH
+const FAR_OUTER = 300;
+const FAR_SAMPLES_ACROSS = 30;
+const SAMPLES_ALONG = 40;
+
+// Biome index mapping for shader attributes
+const BIOME_INDEX_MAP: Record<string, number> = {
+  grassland: 0,
+  forest: 1,
+  mountains: 2,
+  desert: 3,
+  lake: 4,
+};
+
+/**
+ * Compute natural terrain height at a world position.
+ */
+function computeNaturalHeight(
+  wx: number, wz: number, distAlongTrack: number
+): { h: number; weights: BiomeWeight[]; ridgeFactor: number } {
+  const weights = getBiomeWeightsAtDistance(distAlongTrack);
+
+  let ridgeFactor = 0;
+  for (const w of weights) {
+    ridgeFactor += BIOME_HEIGHT[w.biome].ridge * w.weight;
+  }
+  const largeFbm = terrainFbm(wx * 0.004, wz * 0.004, 4, ridgeFactor);
+  const detailNoise = noise2D(wx * 0.015, wz * 0.015) * 0.8
+    + noise2D(wx * 0.04, wz * 0.04) * 0.3;
+
+  let h = 0;
+  for (const w of weights) {
+    const bh = BIOME_HEIGHT[w.biome];
+    h += (largeFbm * bh.scale + bh.base + detailNoise) * w.weight;
+  }
+
+  return { h, weights, ridgeFactor };
+}
+
+/**
+ * Store biome weight/index data into attribute arrays for a given vertex.
+ */
+function storeBiomeAttributes(
+  weights: BiomeWeight[],
+  biomeWeightsArr: Float32Array,
+  biomeIndicesArr: Float32Array,
+  vertIdx: number,
+): void {
+  for (let k = 0; k < 3; k++) {
+    if (k < weights.length) {
+      biomeWeightsArr[vertIdx * 3 + k] = weights[k].weight;
+      biomeIndicesArr[vertIdx * 3 + k] = BIOME_INDEX_MAP[weights[k].biome];
+    } else {
+      biomeWeightsArr[vertIdx * 3 + k] = 0;
+      biomeIndicesArr[vertIdx * 3 + k] = 0;
+    }
+  }
+}
+
+/**
+ * Compute steepness attribute from vertex normals after geometry normals are computed.
+ */
+function computeSteepnessAttribute(geo: THREE.BufferGeometry): void {
+  const normals = geo.attributes.normal;
+  const count = normals.count;
+  const steepness = new Float32Array(count);
+  for (let i = 0; i < count; i++) {
+    steepness[i] = 1.0 - Math.abs(normals.getY(i));
+  }
+  geo.setAttribute('steepness', new THREE.BufferAttribute(steepness, 1));
+}
+
+/**
+ * Compute vertex color for a position given biome weights and height.
+ */
+function computeVertexColor(
+  weights: BiomeWeight[],
+  largeFbm: number,
+  detailNoise: number,
+): THREE.Color {
+  const col = new THREE.Color(0, 0, 0);
+  for (const w of weights) {
+    const bh = BIOME_HEIGHT[w.biome];
+    const bc = BIOME_COLORS[w.biome];
+    const biomeH = largeFbm * bh.scale + bh.base + detailNoise;
+    const heightFactor = Math.max(0, Math.min(1, biomeH / (bh.scale || 1)));
+    const biomeCol = bc.ground.clone().lerp(bc.hill, heightFactor * 0.5);
+
+    // Snow on mountain peaks
+    if (w.biome === 'mountains' && biomeH > 30) {
+      biomeCol.lerp(new THREE.Color(0.95, 0.95, 0.98), (biomeH - 30) / 15);
+    }
+
+    col.r += biomeCol.r * w.weight;
+    col.g += biomeCol.g * w.weight;
+    col.b += biomeCol.b * w.weight;
+  }
+  return col;
+}
+
+// Shared material instance (lazy-initialized)
+let sharedTerrainMat: THREE.Material | null = null;
+function getTerrainMaterial(): THREE.Material {
+  if (!sharedTerrainMat) {
+    sharedTerrainMat = createTerrainMaterial();
+  }
+  return sharedTerrainMat;
+}
+
 /**
  * Generate terrain strip around a single track segment.
- * The terrain is a rectangular strip aligned along the segment's path.
+ * Uses multi-resolution: high-detail near terrain (±40m) and low-detail far terrain (40m-300m).
  * Adapts terrain to track: deformation, bridges, and tunnels.
  */
 export function createSegmentTerrain(
   segment: TrackSegment,
   cumulativeDistance: number,
 ): void {
-  const HALF_WIDTH = 100; // terrain extends this far on each side of track
-  const SAMPLES_ALONG = 40; // samples along segment length
-  const SAMPLES_ACROSS = 40; // samples across width
-
-  const geo = new THREE.PlaneGeometry(
-    1, 1, // placeholder, we'll set vertices manually
-    SAMPLES_ALONG, SAMPLES_ACROSS,
-  );
-
-  const pos = geo.attributes.position;
-  const colors = new Float32Array(pos.count * 3);
-
   // Track data we collect per along-sample for bridge/tunnel decisions
   const trackHeights: number[] = [];
   const naturalHeightsAtTrack: number[] = [];
@@ -43,19 +144,7 @@ export function createSegmentTerrain(
     const t = i / SAMPLES_ALONG;
     const trackPoint = segment.getPointAt(t);
     const distAlongTrack = cumulativeDistance + t * segment.arcLength;
-    const weights = getBiomeWeightsAtDistance(distAlongTrack);
-
-    // Low-frequency fbm for smooth, broad terrain features
-    const largeFbm = fbm(trackPoint.x * 0.004, trackPoint.z * 0.004, 3);
-    // Mild detail — just enough to avoid perfectly flat plains
-    const detailNoise = noise2D(trackPoint.x * 0.015, trackPoint.z * 0.015) * 0.8;
-
-    let h = 0;
-    for (const w of weights) {
-      const bh = BIOME_HEIGHT[w.biome];
-      const biomeH = largeFbm * bh.scale + bh.base + detailNoise;
-      h += biomeH * w.weight;
-    }
+    const { h } = computeNaturalHeight(trackPoint.x, trackPoint.z, distAlongTrack);
 
     trackHeights.push(trackPoint.y);
     naturalHeightsAtTrack.push(h);
@@ -64,139 +153,13 @@ export function createSegmentTerrain(
   // Detect tunnel regions (continuous 10m+ of terrain above track by >5m)
   const tunnelRegions = detectTunnelRegions(segment, trackHeights, naturalHeightsAtTrack, SAMPLES_ALONG);
 
-  for (let j = 0; j <= SAMPLES_ACROSS; j++) {
-    for (let i = 0; i <= SAMPLES_ALONG; i++) {
-      const vertIdx = j * (SAMPLES_ALONG + 1) + i;
-      const t = i / SAMPLES_ALONG;
-      const lateralFrac = (j / SAMPLES_ACROSS) * 2 - 1; // -1 to 1
+  const mat = getTerrainMaterial();
 
-      // Get track position and direction at this t
-      const trackPoint = segment.getPointAt(t);
-      const tangent = segment.getTangentAt(t);
-      const normal = new THREE.Vector3(-tangent.z, 0, tangent.x).normalize();
+  // --- Near terrain: ±NEAR_WIDTH from track center ---
+  createNearTerrain(segment, cumulativeDistance, trackHeights, tunnelRegions, mat);
 
-      // World position of this vertex
-      const wx = trackPoint.x + normal.x * lateralFrac * HALF_WIDTH;
-      const wz = trackPoint.z + normal.z * lateralFrac * HALF_WIDTH;
-
-      // Distance along track for biome lookup
-      const distAlongTrack = cumulativeDistance + t * segment.arcLength;
-      const weights = getBiomeWeightsAtDistance(distAlongTrack);
-
-      // Height calculation — smooth, broad terrain features
-      const largeFbm = fbm(wx * 0.004, wz * 0.004, 3);
-      // Mild detail noise for subtle variation
-      const detailNoise = noise2D(wx * 0.015, wz * 0.015) * 0.8
-        + noise2D(wx * 0.04, wz * 0.04) * 0.3;
-
-      let h = 0;
-      const col = new THREE.Color(0, 0, 0);
-
-      for (const w of weights) {
-        const bh = BIOME_HEIGHT[w.biome];
-        const bc = BIOME_COLORS[w.biome];
-
-        const biomeH = largeFbm * bh.scale + bh.base + detailNoise;
-
-        const heightFactor = Math.max(0, Math.min(1, biomeH / (bh.scale || 1)));
-        const biomeCol = bc.ground.clone().lerp(bc.hill, heightFactor * 0.5);
-
-        // Snow on mountain peaks
-        if (w.biome === 'mountains' && biomeH > 30) {
-          biomeCol.lerp(new THREE.Color(0.95, 0.95, 0.98), (biomeH - 30) / 15);
-        }
-
-        h += biomeH * w.weight;
-        col.r += biomeCol.r * w.weight;
-        col.g += biomeCol.g * w.weight;
-        col.b += biomeCol.b * w.weight;
-      }
-
-      const naturalH = h;
-      const lateralDist = Math.abs(lateralFrac) * HALF_WIDTH;
-      const trackH = trackHeights[i];
-      const heightDiff = trackH - naturalH; // positive = track above terrain
-
-      const inTunnelZone = isInTunnel(t, tunnelRegions);
-
-      // Subtle noise to break up perfectly smooth deformation edges
-      const edgeNoise = noise2D(wx * 0.08, wz * 0.08) * 0.4;
-
-      if (inTunnelZone) {
-        // Tunnel zone: terrain stays at natural height (the tube covers the track)
-        // No terrain carving needed — the TubeGeometry forms the tunnel shell
-      } else if (Math.abs(heightDiff) < HEIGHT_DIFF_THRESHOLD) {
-        // Case 1: Small height difference — deform terrain toward track
-        // Use embankment shape: flat track bed, then gentle slope, then smooth blend to natural
-        const trackBedH = trackH - 1.0;
-        if (lateralDist < TRACK_BED_HALF_WIDTH) {
-          // Flat track bed
-          h = trackBedH;
-        } else if (lateralDist < EMBANKMENT_WIDTH) {
-          // Embankment slope: raised area that slopes down from track bed
-          const embankT = (lateralDist - TRACK_BED_HALF_WIDTH) / (EMBANKMENT_WIDTH - TRACK_BED_HALF_WIDTH);
-          // Quintic smoothstep for smoother transition (C2 continuous)
-          const smooth = embankT * embankT * embankT * (embankT * (embankT * 6 - 15) + 10);
-          const embankTarget = THREE.MathUtils.lerp(trackBedH, naturalH, 0.3);
-          h = THREE.MathUtils.lerp(trackBedH, embankTarget + edgeNoise, smooth);
-        } else if (lateralDist < DEFORM_RADIUS) {
-          // Gradual blend from embankment edge to natural terrain
-          const blendT = (lateralDist - EMBANKMENT_WIDTH) / (DEFORM_RADIUS - EMBANKMENT_WIDTH);
-          // Quintic smoothstep
-          const smooth = blendT * blendT * blendT * (blendT * (blendT * 6 - 15) + 10);
-          const embankEdgeH = THREE.MathUtils.lerp(trackBedH, naturalH, 0.3) + edgeNoise;
-          h = THREE.MathUtils.lerp(embankEdgeH, naturalH, smooth);
-        }
-        // Color: darken near track to suggest gravel/earth
-        if (lateralDist < EMBANKMENT_WIDTH) {
-          const darkT = 1 - lateralDist / EMBANKMENT_WIDTH;
-          col.r = THREE.MathUtils.lerp(col.r, 0.35, darkT * 0.3);
-          col.g = THREE.MathUtils.lerp(col.g, 0.30, darkT * 0.3);
-          col.b = THREE.MathUtils.lerp(col.b, 0.25, darkT * 0.3);
-        }
-      } else if (heightDiff > HEIGHT_DIFF_THRESHOLD) {
-        // Case 2: Track much higher than terrain — bridge area
-        // Don't carve terrain, just leave it natural under the bridge
-        if (lateralDist < TRACK_BED_HALF_WIDTH) {
-          h = Math.min(naturalH, trackH - HEIGHT_DIFF_THRESHOLD);
-        }
-      }
-      // Case 3 (tunnel) is handled by inTunnelZone above — terrain stays natural
-
-      // Water areas in lake biome: smooth shoreline
-      const biome = getBiomeAtDistance(distAlongTrack);
-      if (biome === 'lake' && lateralDist > 15 && h < 1.0) {
-        // Smooth transition into water — no abrupt cut
-        const waterBlend = Math.max(0, Math.min(1, (1.0 - h) / 2.0));
-        h = THREE.MathUtils.lerp(h, Math.min(h, -1.5), waterBlend);
-        // Tint terrain near water edge
-        if (h < 0.5 && h > -1.0) {
-          col.r = THREE.MathUtils.lerp(col.r, 0.18, 0.3);
-          col.g = THREE.MathUtils.lerp(col.g, 0.40, 0.3);
-          col.b = THREE.MathUtils.lerp(col.b, 0.22, 0.3);
-        }
-      }
-
-      pos.setXYZ(vertIdx, wx, h, wz);
-
-      colors[vertIdx * 3] = col.r;
-      colors[vertIdx * 3 + 1] = col.g;
-      colors[vertIdx * 3 + 2] = col.b;
-    }
-  }
-
-  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  geo.computeVertexNormals();
-
-  const mat = new THREE.MeshStandardMaterial({
-    vertexColors: true,
-    roughness: 0.9,
-    metalness: 0.0,
-    flatShading: false,
-  });
-
-  const mesh = new THREE.Mesh(geo, mat);
-  segment.terrainGroup.add(mesh);
+  // --- Far terrain: FAR_INNER to FAR_OUTER on each side ---
+  createFarTerrain(segment, cumulativeDistance, mat);
 
   // Add bridge pillars where track is significantly above terrain
   addBridgePillars(segment, cumulativeDistance, trackHeights, naturalHeightsAtTrack, SAMPLES_ALONG);
@@ -211,11 +174,207 @@ export function createSegmentTerrain(
 }
 
 /**
+ * Create the high-resolution near terrain mesh (±NEAR_WIDTH from track).
+ * Includes all track deformation logic.
+ */
+function createNearTerrain(
+  segment: TrackSegment,
+  cumulativeDistance: number,
+  trackHeights: number[],
+  tunnelRegions: Array<{ startT: number; endT: number }>,
+  mat: THREE.Material,
+): void {
+  const nearGeo = new THREE.PlaneGeometry(1, 1, SAMPLES_ALONG, NEAR_SAMPLES_ACROSS);
+  const nearPos = nearGeo.attributes.position;
+  const nearColors = new Float32Array(nearPos.count * 3);
+  const nearBiomeWeights = new Float32Array(nearPos.count * 3);
+  const nearBiomeIndices = new Float32Array(nearPos.count * 3);
+
+  for (let j = 0; j <= NEAR_SAMPLES_ACROSS; j++) {
+    for (let i = 0; i <= SAMPLES_ALONG; i++) {
+      const vertIdx = j * (SAMPLES_ALONG + 1) + i;
+      const t = i / SAMPLES_ALONG;
+      const lateralFrac = (j / NEAR_SAMPLES_ACROSS) * 2 - 1; // -1 to 1
+
+      const trackPoint = segment.getPointAt(t);
+      const tangent = segment.getTangentAt(t);
+      const normal = new THREE.Vector3(-tangent.z, 0, tangent.x).normalize();
+
+      const wx = trackPoint.x + normal.x * lateralFrac * NEAR_WIDTH;
+      const wz = trackPoint.z + normal.z * lateralFrac * NEAR_WIDTH;
+      const distAlongTrack = cumulativeDistance + t * segment.arcLength;
+
+      const { h: naturalH, weights, ridgeFactor } = computeNaturalHeight(wx, wz, distAlongTrack);
+
+      // Recompute fbm/detail for vertex color (matches computeNaturalHeight internals)
+      const largeFbm = terrainFbm(wx * 0.004, wz * 0.004, 4, ridgeFactor);
+      const detailNoise = noise2D(wx * 0.015, wz * 0.015) * 0.8
+        + noise2D(wx * 0.04, wz * 0.04) * 0.3;
+
+      const col = computeVertexColor(weights, largeFbm, detailNoise);
+
+      let h = naturalH;
+      const lateralDist = Math.abs(lateralFrac) * NEAR_WIDTH;
+      const trackH = trackHeights[i];
+      const heightDiff = trackH - naturalH; // positive = track above terrain
+
+      const inTunnelZone = isInTunnel(t, tunnelRegions);
+
+      // Subtle noise to break up perfectly smooth deformation edges
+      const edgeNoise = noise2D(wx * 0.08, wz * 0.08) * 0.4;
+
+      if (inTunnelZone) {
+        // Tunnel zone: terrain stays at natural height
+      } else {
+        // Continuous road-aware terrain blending
+        const trackBedH = trackH - 1.0;
+        const absDiff = Math.abs(heightDiff);
+        const influenceT = Math.min(1, absDiff / (HEIGHT_DIFF_THRESHOLD * 2));
+        const heightInfluence = 1.0 - influenceT * influenceT * influenceT *
+          (influenceT * (influenceT * 6 - 15) + 10);
+
+        if (lateralDist < TRACK_BED_HALF_WIDTH) {
+          h = THREE.MathUtils.lerp(naturalH, trackBedH, heightInfluence);
+        } else if (lateralDist < EMBANKMENT_WIDTH) {
+          const embankT = (lateralDist - TRACK_BED_HALF_WIDTH) / (EMBANKMENT_WIDTH - TRACK_BED_HALF_WIDTH);
+          const smooth = embankT * embankT * embankT * (embankT * (embankT * 6 - 15) + 10);
+          const embankTarget = THREE.MathUtils.lerp(trackBedH, naturalH, 0.3);
+          const deformedH = THREE.MathUtils.lerp(trackBedH, embankTarget + edgeNoise, smooth);
+          h = THREE.MathUtils.lerp(naturalH, deformedH, heightInfluence);
+        } else if (lateralDist < DEFORM_RADIUS) {
+          const blendT = (lateralDist - EMBANKMENT_WIDTH) / (DEFORM_RADIUS - EMBANKMENT_WIDTH);
+          const smooth = blendT * blendT * blendT * (blendT * (blendT * 6 - 15) + 10);
+          const embankEdgeH = THREE.MathUtils.lerp(trackBedH, naturalH, 0.3) + edgeNoise;
+          const deformedH = THREE.MathUtils.lerp(embankEdgeH, naturalH, smooth);
+          h = THREE.MathUtils.lerp(naturalH, deformedH, heightInfluence);
+        }
+
+        // Color: darken near track to suggest gravel/earth
+        if (lateralDist < EMBANKMENT_WIDTH && heightInfluence > 0.1) {
+          const darkT = (1 - lateralDist / EMBANKMENT_WIDTH) * heightInfluence;
+          col.r = THREE.MathUtils.lerp(col.r, 0.35, darkT * 0.3);
+          col.g = THREE.MathUtils.lerp(col.g, 0.30, darkT * 0.3);
+          col.b = THREE.MathUtils.lerp(col.b, 0.25, darkT * 0.3);
+        }
+      }
+
+      // Water areas in lake biome: smooth shoreline
+      const biome = getBiomeAtDistance(distAlongTrack);
+      if (biome === 'lake' && lateralDist > 15 && h < 1.0) {
+        const waterBlend = Math.max(0, Math.min(1, (1.0 - h) / 2.0));
+        h = THREE.MathUtils.lerp(h, Math.min(h, -1.5), waterBlend);
+        if (h < 0.5 && h > -1.0) {
+          col.r = THREE.MathUtils.lerp(col.r, 0.18, 0.3);
+          col.g = THREE.MathUtils.lerp(col.g, 0.40, 0.3);
+          col.b = THREE.MathUtils.lerp(col.b, 0.22, 0.3);
+        }
+      }
+
+      nearPos.setXYZ(vertIdx, wx, h, wz);
+
+      nearColors[vertIdx * 3] = col.r;
+      nearColors[vertIdx * 3 + 1] = col.g;
+      nearColors[vertIdx * 3 + 2] = col.b;
+
+      // Store biome attributes
+      storeBiomeAttributes(weights, nearBiomeWeights, nearBiomeIndices, vertIdx);
+    }
+  }
+
+  nearGeo.setAttribute('color', new THREE.BufferAttribute(nearColors, 3));
+  nearGeo.setAttribute('biomeWeights', new THREE.BufferAttribute(nearBiomeWeights, 3));
+  nearGeo.setAttribute('biomeIndices', new THREE.BufferAttribute(nearBiomeIndices, 3));
+  nearGeo.computeVertexNormals();
+  computeSteepnessAttribute(nearGeo);
+
+  const nearMesh = new THREE.Mesh(nearGeo, mat);
+  segment.terrainGroup.add(nearMesh);
+}
+
+/**
+ * Create the low-resolution far terrain meshes (FAR_INNER to FAR_OUTER on each side).
+ * No track deformation applied (too far from track).
+ */
+function createFarTerrain(
+  segment: TrackSegment,
+  cumulativeDistance: number,
+  mat: THREE.Material,
+): void {
+  for (const side of [-1, 1] as const) {
+    const farGeo = new THREE.PlaneGeometry(1, 1, SAMPLES_ALONG, FAR_SAMPLES_ACROSS);
+    const farPos = farGeo.attributes.position;
+    const farColors = new Float32Array(farPos.count * 3);
+    const farBiomeWeights = new Float32Array(farPos.count * 3);
+    const farBiomeIndices = new Float32Array(farPos.count * 3);
+
+    for (let j = 0; j <= FAR_SAMPLES_ACROSS; j++) {
+      for (let i = 0; i <= SAMPLES_ALONG; i++) {
+        const vertIdx = j * (SAMPLES_ALONG + 1) + i;
+        const t = i / SAMPLES_ALONG;
+
+        // lateralDist: for side=1 (right) goes inner→outer as j increases;
+        // for side=-1 (left) goes outer→inner to preserve face winding order
+        const lateralDist = side === 1
+          ? FAR_INNER + (j / FAR_SAMPLES_ACROSS) * (FAR_OUTER - FAR_INNER)
+          : FAR_OUTER - (j / FAR_SAMPLES_ACROSS) * (FAR_OUTER - FAR_INNER);
+
+        const trackPoint = segment.getPointAt(t);
+        const tangent = segment.getTangentAt(t);
+        const normal = new THREE.Vector3(-tangent.z, 0, tangent.x).normalize();
+
+        const wx = trackPoint.x + normal.x * side * lateralDist;
+        const wz = trackPoint.z + normal.z * side * lateralDist;
+        const distAlongTrack = cumulativeDistance + t * segment.arcLength;
+
+        const { h, weights, ridgeFactor } = computeNaturalHeight(wx, wz, distAlongTrack);
+
+        // Compute vertex color
+        const largeFbm = terrainFbm(wx * 0.004, wz * 0.004, 4, ridgeFactor);
+        const detailNoise = noise2D(wx * 0.015, wz * 0.015) * 0.8
+          + noise2D(wx * 0.04, wz * 0.04) * 0.3;
+        const col = computeVertexColor(weights, largeFbm, detailNoise);
+
+        // Water areas in lake biome
+        let finalH = h;
+        const biome = getBiomeAtDistance(distAlongTrack);
+        if (biome === 'lake' && lateralDist > 15 && finalH < 1.0) {
+          const waterBlend = Math.max(0, Math.min(1, (1.0 - finalH) / 2.0));
+          finalH = THREE.MathUtils.lerp(finalH, Math.min(finalH, -1.5), waterBlend);
+          if (finalH < 0.5 && finalH > -1.0) {
+            col.r = THREE.MathUtils.lerp(col.r, 0.18, 0.3);
+            col.g = THREE.MathUtils.lerp(col.g, 0.40, 0.3);
+            col.b = THREE.MathUtils.lerp(col.b, 0.22, 0.3);
+          }
+        }
+
+        farPos.setXYZ(vertIdx, wx, finalH, wz);
+
+        farColors[vertIdx * 3] = col.r;
+        farColors[vertIdx * 3 + 1] = col.g;
+        farColors[vertIdx * 3 + 2] = col.b;
+
+        // Store biome attributes
+        storeBiomeAttributes(weights, farBiomeWeights, farBiomeIndices, vertIdx);
+      }
+    }
+
+    farGeo.setAttribute('color', new THREE.BufferAttribute(farColors, 3));
+    farGeo.setAttribute('biomeWeights', new THREE.BufferAttribute(farBiomeWeights, 3));
+    farGeo.setAttribute('biomeIndices', new THREE.BufferAttribute(farBiomeIndices, 3));
+    farGeo.computeVertexNormals();
+    computeSteepnessAttribute(farGeo);
+
+    const farMesh = new THREE.Mesh(farGeo, mat);
+    segment.terrainGroup.add(farMesh);
+  }
+}
+
+/**
  * Add water surface with gentle wave displacement for lake biomes.
  * Uses two layers: a darker deep layer and a lighter rippled surface.
  */
 function addWaterSurface(segment: TrackSegment): void {
-  const HALF_WIDTH_VAL = 100;
+  const HALF_WIDTH_VAL = 300;
   const center = segment.getPointAt(0.5);
   const tangent = segment.getTangentAt(0.5);
   const angle = Math.atan2(tangent.x, tangent.z);

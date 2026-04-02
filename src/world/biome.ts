@@ -10,6 +10,7 @@ export interface BiomeColorConfig {
 export interface BiomeHeightConfig {
   scale: number;
   base: number;
+  ridge: number;
 }
 
 export interface BiomeInfo {
@@ -205,9 +206,9 @@ export const BIOME_COLORS: Record<BiomeName, BiomeColorConfig> = {
 };
 
 export const BIOME_HEIGHT: Record<BiomeName, BiomeHeightConfig> = {
-  grassland: { scale: 5, base: 0 },
-  forest:    { scale: 4, base: 0 },
-  mountains: { scale: 45, base: 3 },
-  desert:    { scale: 3, base: 0 },
-  lake:      { scale: 4, base: -2 },
+  grassland: { scale: 5, base: 0, ridge: 0.1 },
+  forest:    { scale: 4, base: 0, ridge: 0.3 },
+  mountains: { scale: 45, base: 3, ridge: 0.7 },
+  desert:    { scale: 3, base: 0, ridge: 0.4 },
+  lake:      { scale: 4, base: -2, ridge: 0.0 },
 };

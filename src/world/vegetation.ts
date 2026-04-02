@@ -231,7 +231,7 @@ export function createSegmentVegetation(
   // Seed RNG with segment index for determinism
   const rand = seededRng(segment.index * 7919 + 42);
   const OBJECT_COUNT = 80; // objects per segment
-  const HALF_WIDTH = 90;
+  const HALF_WIDTH = 200;
 
   for (let i = 0; i < OBJECT_COUNT; i++) {
     const t = rand(); // position along segment

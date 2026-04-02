@@ -74,3 +74,22 @@ export function fbm(x: number, y: number, octaves = 4): number {
   }
   return val / max;
 }
+
+export function ridgedFbm(x: number, y: number, octaves = 4): number {
+  let val = 0, amp = 1, freq = 1, max = 0;
+  for (let i = 0; i < octaves; i++) {
+    let ridge = 1.0 - Math.abs(noise2D(x * freq, y * freq));
+    ridge *= ridge;
+    val += ridge * amp;
+    max += amp;
+    amp *= 0.5;
+    freq *= 2;
+  }
+  return val / max;
+}
+
+export function terrainFbm(x: number, y: number, octaves = 4, ridgeFactor = 0): number {
+  const smooth = fbm(x, y, octaves);
+  const ridged = ridgedFbm(x, y, octaves);
+  return smooth + (ridged - smooth) * ridgeFactor;
+}

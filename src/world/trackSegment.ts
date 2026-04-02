@@ -55,7 +55,7 @@ export class TrackSegment {
     for (const p of points) box.expandByPoint(p);
     box.getBoundingSphere(this.boundingSphere);
     // Expand to include terrain width
-    this.boundingSphere.radius += 100;
+    this.boundingSphere.radius += 300;
 
     scene.add(this.meshGroup);
     scene.add(this.terrainGroup);

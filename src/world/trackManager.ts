@@ -17,6 +17,7 @@ export class TrackManager {
   private cumulativeDistance = 0; // total distance generated so far
   private lastAngle = 0; // current heading angle (radians, 0 = +Z)
   private lastElevation = 2; // current Y
+  private elevationHistory: number[] = [];
 
   // Generation parameters
   private static readonly SEGMENT_LENGTH = 100; // target arc length per segment
@@ -71,6 +72,22 @@ export class TrackManager {
 
     // Smoothly approach target elevation
     this.lastElevation = THREE.MathUtils.lerp(this.lastElevation, targetY, 0.3);
+
+    // 9-point weighted average elevation smoothing
+    this.elevationHistory.push(this.lastElevation);
+    if (this.elevationHistory.length > 9) {
+      this.elevationHistory.shift();
+    }
+    const weights = [1, 2, 3, 4, 5, 4, 3, 2, 1];
+    const n = this.elevationHistory.length;
+    const usedWeights = weights.slice(9 - n); // use weights from end so most recent gets weight 5
+    let weightedSum = 0;
+    let weightTotal = 0;
+    for (let i = 0; i < n; i++) {
+      weightedSum += this.elevationHistory[i] * usedWeights[i];
+      weightTotal += usedWeights[i];
+    }
+    this.lastElevation = weightedSum / weightTotal;
 
     const endPos = start.position.clone().add(
       new THREE.Vector3(dx * L, 0, dz * L),
