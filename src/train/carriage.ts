@@ -3,6 +3,8 @@ import * as THREE from 'three';
 export interface CarriageResult {
   group: THREE.Group;
   wheels: THREE.Object3D[];
+  frontCouplingLocal: THREE.Vector3;
+  rearCouplingLocal: THREE.Vector3;
 }
 
 export function createCarriage(color: number, offset: number): CarriageResult {
@@ -194,5 +196,10 @@ export function createCarriage(color: number, offset: number): CarriageResult {
 
   group.userData.offset = offset;
 
-  return { group, wheels };
+  return {
+    group,
+    wheels,
+    frontCouplingLocal: new THREE.Vector3(0, 0.55, 1.86),
+    rearCouplingLocal: new THREE.Vector3(0, 0.55, -1.86),
+  };
 }

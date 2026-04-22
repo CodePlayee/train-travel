@@ -27,7 +27,8 @@ export class TrainController {
   private trackPos: TrackPosition = { segmentIndex: 0, localT: 0 };
 
   // Carriage offsets in world units (arc-length distance behind locomotive)
-  private readonly carriageOffsets: number[] = [6, 12];
+  // Each carriage is 3.72m between coupling faces; first carriage 5.72m behind loco
+  private readonly carriageOffsets: number[] = [5.72, 9.44, 13.16, 16.88, 20.60];
 
   // Smoke particle system
   private smokeParticles: SmokeParticle[] = [];
@@ -40,6 +41,13 @@ export class TrainController {
   // Headlight
   private headlightSpot: THREE.SpotLight;
 
+  // Coupling drawbars
+  private couplings: THREE.Mesh[] = [];
+  private locoRearLocal: THREE.Vector3;
+  private carriageGroups: THREE.Group[] = [];
+  private carriageFrontLocals: THREE.Vector3[] = [];
+  private carriageRearLocals: THREE.Vector3[] = [];
+
   constructor(scene: THREE.Scene) {
     this.group = new THREE.Group();
     this.locomotiveWheels = [];
@@ -51,19 +59,35 @@ export class TrainController {
     this.locomotiveWheels = loco.wheels;
     this.locomotiveGroup = loco.group;
     this.chimneyWorldPos = loco.chimneyWorldPos;
+    this.locoRearLocal = loco.rearCouplingLocal;
 
     // Carriages
     const carriageConfigs: [number, number][] = [
-      [0x2266aa, 0],
-      [0x22aa66, 0],
+      [0x2266aa, 0], // blue
+      [0x22aa66, 0], // green
+      [0xaa3333, 0], // red
+      [0x886633, 0], // brown
+      [0x6633aa, 0], // purple
     ];
     for (const [color] of carriageConfigs) {
       const carriage = createCarriage(color, 0);
       this.group.add(carriage.group);
       this.carriageWheels.push(...carriage.wheels);
+      this.carriageGroups.push(carriage.group);
+      this.carriageFrontLocals.push(carriage.frontCouplingLocal);
+      this.carriageRearLocals.push(carriage.rearCouplingLocal);
     }
 
     scene.add(this.group);
+
+    // Coupling drawbars (one between each adjacent pair)
+    const couplingMat = new THREE.MeshStandardMaterial({ color: 0x555555, metalness: 0.6, roughness: 0.3 });
+    for (let i = 0; i < this.carriageOffsets.length; i++) {
+      const couplingGeo = new THREE.CylinderGeometry(0.04, 0.04, 1, 6);
+      const coupling = new THREE.Mesh(couplingGeo, couplingMat);
+      this.couplings.push(coupling);
+      this.group.add(coupling);
+    }
 
     // Initialize smoke particle pool
     const smokeMat = new THREE.MeshStandardMaterial({
@@ -120,6 +144,30 @@ export class TrainController {
       const tangent = trackManager.getTangentAt(carriagePos);
       carriageGroup.position.copy(pos);
       carriageGroup.lookAt(pos.clone().add(tangent));
+    }
+
+    // Update coupling drawbars
+    this.group.updateMatrixWorld(true);
+    for (let i = 0; i < this.couplings.length; i++) {
+      const previousObject = i === 0 ? locoGroup : this.carriageGroups[i - 1];
+      const previousLocal = i === 0 ? this.locoRearLocal : this.carriageRearLocals[i - 1];
+      const nextObject = this.carriageGroups[i];
+      const nextLocal = this.carriageFrontLocals[i];
+
+      const a = previousLocal.clone().applyMatrix4(previousObject.matrixWorld);
+      const b = nextLocal.clone().applyMatrix4(nextObject.matrixWorld);
+
+      const mid = a.clone().add(b).multiplyScalar(0.5);
+      const dir = b.clone().sub(a);
+      const len = dir.length();
+      const coupling = this.couplings[i];
+      coupling.position.copy(mid);
+      coupling.scale.set(1, Math.max(len, 0.01), 1);
+      if (len > 1e-4) {
+        const up = dir.clone().normalize();
+        const quat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), up);
+        coupling.quaternion.copy(quat);
+      }
     }
 
     // Wheel rotation — use rotateY (quaternion) to avoid Euler gimbal lock

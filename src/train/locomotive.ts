@@ -4,6 +4,7 @@ export interface LocomotiveResult {
   group: THREE.Group;
   wheels: THREE.Object3D[];
   chimneyWorldPos: THREE.Vector3;
+  rearCouplingLocal: THREE.Vector3;
 }
 
 /** Create a wheel with spokes (hub + rim + spoke bars).
@@ -304,6 +305,28 @@ export function createLocomotive(): LocomotiveResult {
   tenderFrame.position.set(0, 0.55, -3.2);
   group.add(tenderFrame);
 
+  // Rear buffer beam (back of tender)
+  const rearBufferBeam = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.15, 0.1), darkMat);
+  rearBufferBeam.position.set(0, 0.55, -3.86);
+  group.add(rearBufferBeam);
+
+  for (const side of [-1, 1]) {
+    const rearBufferPad = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 0.12, 8), darkMat);
+    rearBufferPad.rotation.x = Math.PI / 2;
+    rearBufferPad.position.set(side * 0.45, 0.55, -3.95);
+    group.add(rearBufferPad);
+
+    const rearBufferShank = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.15, 6), brassyMat);
+    rearBufferShank.rotation.x = Math.PI / 2;
+    rearBufferShank.position.set(side * 0.45, 0.55, -3.85);
+    group.add(rearBufferShank);
+  }
+
+  const rearCouplingHook = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.25, 6), darkMat);
+  rearCouplingHook.rotation.x = Math.PI / 2;
+  rearCouplingHook.position.set(0, 0.55, -3.95);
+  group.add(rearCouplingHook);
+
   // Tender wheels (also spoked)
   const tenderWheelPositions: [number, number, number][] = [
     [-0.6, 0.35, -2.8], [0.6, 0.35, -2.8],
@@ -333,5 +356,5 @@ export function createLocomotive(): LocomotiveResult {
   // Store chimney position for smoke particles
   const chimneyWorldPos = new THREE.Vector3(0, 2.5, 1.2);
 
-  return { group, wheels, chimneyWorldPos };
+  return { group, wheels, chimneyWorldPos, rearCouplingLocal: new THREE.Vector3(0, 0.55, -3.95) };
 }
