@@ -173,7 +173,7 @@ export class TrainController {
     // Wheel rotation — use rotateY (quaternion) to avoid Euler gimbal lock
     const wheelRot = this.speed * 2;
     for (const w of this.locomotiveWheels) w.rotateX(-wheelRot);
-    for (const w of this.carriageWheels) w.rotateY(wheelRot);
+    for (const w of this.carriageWheels) w.rotateX(-wheelRot);
 
     const position = locoPos;
     const direction = locoTangent;

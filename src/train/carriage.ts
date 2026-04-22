@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { createSpokedWheel } from './wheel';
 
 export interface CarriageResult {
   group: THREE.Group;
@@ -19,10 +20,66 @@ export function createCarriage(color: number, offset: number): CarriageResult {
     roughness: 0.5,
   });
 
-  // Body
-  const body = new THREE.Mesh(new THREE.BoxGeometry(1.5, 1.2, 3.5), bodyMat);
-  body.position.set(0, 1.2, 0);
-  group.add(body);
+  // Body — hollow shell so the interior is visible through the windows.
+  // Lower wall band (below windows)
+  const lowerWall = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.5, 3.5), bodyMat);
+  lowerWall.position.set(0, 0.85, 0);
+  group.add(lowerWall);
+
+  // Upper wall band (above windows)
+  const upperWall = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.3, 3.5), bodyMat);
+  upperWall.position.set(0, 1.65, 0);
+  group.add(upperWall);
+
+  // Vertical pillars between windows on each side
+  const pillarGeo = new THREE.BoxGeometry(0.05, 0.4, 0.1);
+  for (const side of [-1, 1]) {
+    for (const pz of [-1.75, -0.8, 0, 0.8, 1.75]) {
+      const pillar = new THREE.Mesh(pillarGeo, bodyMat);
+      pillar.position.set(side * 0.75, 1.3, pz);
+      group.add(pillar);
+    }
+  }
+
+  // Interior floor (wooden planks)
+  const floorMat = new THREE.MeshStandardMaterial({ color: 0x6b4423, metalness: 0.1, roughness: 0.8 });
+  const floor = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.04, 3.4), floorMat);
+  floor.position.set(0, 0.62, 0);
+  group.add(floor);
+
+  // Interior ceiling
+  const ceiling = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.04, 3.4), darkMat);
+  ceiling.position.set(0, 1.78, 0);
+  group.add(ceiling);
+
+  // Seat rows (visible through windows)
+  const seatMat = new THREE.MeshStandardMaterial({ color: 0x884444, metalness: 0.1, roughness: 0.7 });
+  const seatBaseGeo = new THREE.BoxGeometry(0.45, 0.06, 0.4);
+  const seatBackGeo = new THREE.BoxGeometry(0.05, 0.4, 0.4);
+  for (const rz of [-1.2, -0.4, 0.4, 1.2]) {
+    for (const side of [-1, 1]) {
+      const seatBase = new THREE.Mesh(seatBaseGeo, seatMat);
+      seatBase.position.set(side * 0.45, 0.95, rz);
+      group.add(seatBase);
+
+      const seatBack = new THREE.Mesh(seatBackGeo, seatMat);
+      seatBack.position.set(side * 0.65, 1.18, rz);
+      group.add(seatBack);
+    }
+  }
+
+  // Ceiling lamp pads
+  const lampMat = new THREE.MeshStandardMaterial({
+    color: 0xffeebb,
+    emissive: 0xffeebb,
+    emissiveIntensity: 0.8,
+  });
+  const lampGeo = new THREE.SphereGeometry(0.06, 6, 4);
+  for (const lz of [-1, 1]) {
+    const lamp = new THREE.Mesh(lampGeo, lampMat);
+    lamp.position.set(0, 1.74, lz);
+    group.add(lamp);
+  }
 
   // Color stripe along the bottom of the body
   const stripeMat = new THREE.MeshStandardMaterial({
@@ -126,17 +183,17 @@ export function createCarriage(color: number, offset: number): CarriageResult {
     }
   }
 
-  // Wheels
-  const wheelGeo = new THREE.CylinderGeometry(0.35, 0.35, 0.1, 12);
+  // Wheels (spoked)
   const wheelMat = new THREE.MeshStandardMaterial({ color: 0x222222, metalness: 0.7, roughness: 0.3 });
+  const hubMat = new THREE.MeshStandardMaterial({ color: 0x444444, metalness: 0.5, roughness: 0.4 });
   const positions: [number, number, number][] = [
     [-0.7, 0.35, 1.2], [0.7, 0.35, 1.2],
     [-0.7, 0.35, -1.2], [0.7, 0.35, -1.2],
   ];
   for (const [x, y, z] of positions) {
-    const wheel = new THREE.Mesh(wheelGeo, wheelMat);
+    const wheel = createSpokedWheel(0.35, 0.1, wheelMat, hubMat);
     wheel.position.set(x, y, z);
-    wheel.rotation.z = Math.PI / 2;
+    // Wheel built with axle along X — no extra rotation needed
     group.add(wheel);
     wheels.push(wheel);
   }
