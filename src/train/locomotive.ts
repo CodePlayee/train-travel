@@ -6,21 +6,22 @@ export interface LocomotiveResult {
   chimneyWorldPos: THREE.Vector3;
 }
 
-/** Create a wheel with spokes (hub + rim + spoke bars). */
+/** Create a wheel with spokes (hub + rim + spoke bars).
+ *  Built with axle along X, disc in YZ plane (vertical). */
 function createSpokedWheel(radius: number, width: number, wheelMat: THREE.Material, brassyMat: THREE.Material): THREE.Group {
   const wheelGroup = new THREE.Group();
 
-  // Outer rim (torus)
+  // Outer rim (torus) — default disc in XY plane (axle Z), rotate to YZ plane (axle X)
   const rim = new THREE.Mesh(new THREE.TorusGeometry(radius, 0.04, 6, 16), wheelMat);
   rim.rotation.y = Math.PI / 2;
   wheelGroup.add(rim);
 
-  // Hub
+  // Hub (cylinder along X = axle)
   const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, width + 0.02, 8), brassyMat);
   hub.rotation.z = Math.PI / 2;
   wheelGroup.add(hub);
 
-  // Spokes
+  // Spokes (radiate in YZ plane)
   const spokeCount = 8;
   for (let s = 0; s < spokeCount; s++) {
     const angle = (s / spokeCount) * Math.PI * 2;
@@ -224,7 +225,7 @@ export function createLocomotive(): LocomotiveResult {
   for (const [x, y, z] of wheelPositions) {
     const spokeWheel = createSpokedWheel(0.35, 0.1, wheelMat, brassyMat);
     spokeWheel.position.set(x, y, z);
-    spokeWheel.rotation.z = Math.PI / 2;
+    // Wheel built with axle along X — no extra rotation needed
     group.add(spokeWheel);
     wheels.push(spokeWheel);
   }
@@ -311,7 +312,7 @@ export function createLocomotive(): LocomotiveResult {
   for (const [x, y, z] of tenderWheelPositions) {
     const spokeWheel = createSpokedWheel(0.3, 0.1, wheelMat, brassyMat);
     spokeWheel.position.set(x, y, z);
-    spokeWheel.rotation.z = Math.PI / 2;
+    // Wheel built with axle along X — no extra rotation needed
     group.add(spokeWheel);
     wheels.push(spokeWheel);
   }

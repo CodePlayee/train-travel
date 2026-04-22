@@ -122,10 +122,10 @@ export class TrainController {
       carriageGroup.lookAt(pos.clone().add(tangent));
     }
 
-    // Wheel rotation
+    // Wheel rotation — use rotateY (quaternion) to avoid Euler gimbal lock
     const wheelRot = this.speed * 2;
-    for (const w of this.locomotiveWheels) w.rotation.x += wheelRot;
-    for (const w of this.carriageWheels) w.rotation.x += wheelRot;
+    for (const w of this.locomotiveWheels) w.rotateX(-wheelRot);
+    for (const w of this.carriageWheels) w.rotateY(wheelRot);
 
     const position = locoPos;
     const direction = locoTangent;
