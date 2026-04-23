@@ -682,19 +682,21 @@ function addBridgeDecks(
     }
 
     // Index buffer: left side, top, right side (skip bottom — never visible).
+    // Winding chosen so each face's outward normal points away from the deck:
+    //   left side → -lateral, top → +Y, right side → +lateral.
     const indices: number[] = [];
     for (let i = 0; i < steps; i++) {
       const curr = i * csLen;
       const next = (i + 1) * csLen;
-      // Left side: 0-1
-      indices.push(curr + 0, next + 0, next + 1);
-      indices.push(curr + 0, next + 1, curr + 1);
-      // Top: 1-2
-      indices.push(curr + 1, next + 1, next + 2);
-      indices.push(curr + 1, next + 2, curr + 2);
-      // Right side: 2-3
-      indices.push(curr + 2, next + 2, next + 3);
-      indices.push(curr + 2, next + 3, curr + 3);
+      // Left side (0-1): outward normal = -lateral
+      indices.push(curr + 0, next + 1, next + 0);
+      indices.push(curr + 0, curr + 1, next + 1);
+      // Top (1-2): outward normal = +Y
+      indices.push(curr + 1, next + 2, next + 1);
+      indices.push(curr + 1, curr + 2, next + 2);
+      // Right side (2-3): outward normal = +lateral
+      indices.push(curr + 2, next + 3, next + 2);
+      indices.push(curr + 2, curr + 3, next + 3);
     }
 
     // End caps (front + back) so the slab doesn't look hollow at run boundaries.
