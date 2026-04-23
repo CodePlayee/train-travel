@@ -185,8 +185,14 @@ export class TrainController {
     // Update smoke particles
     this.updateSmoke(dt, direction);
 
-    // Update headlight
-    this.updateHeadlight(position, direction, dayTime);
+    // Headlight: combine night-time and tunnel proximity (long lookahead so the
+    // beam is on before the train enters the tunnel mouth).
+    const tunnelProximity = trackManager.getTunnelProximity(this.trackPos, this.speed, {
+      rampSeconds: 4.0,
+      minRamp: 30,
+      maxRamp: 150,
+    });
+    this.updateHeadlight(position, direction, dayTime, tunnelProximity);
 
     return { position, direction, speed: this.speed, trackPosition: this.trackPos };
   }
@@ -266,20 +272,17 @@ export class TrainController {
     position: THREE.Vector3,
     direction: THREE.Vector3,
     dayTime?: number,
+    tunnelProximity = 0,
   ): void {
     void position;
     void direction;
 
-    if (dayTime === undefined) {
-      this.headlightBeam.intensity = 0;
-      this.headlightEmissive.emissiveIntensity = 0;
-      return;
-    }
-
     // dayTime: 0=midnight, 0.25=sunrise, 0.5=noon, 0.75=sunset.
     // nightFactor: 1 at deep night, 0 during day, with smooth ramps at dawn/dusk.
     let nightFactor: number;
-    if (dayTime < 0.2) {
+    if (dayTime === undefined) {
+      nightFactor = 0;
+    } else if (dayTime < 0.2) {
       nightFactor = 1.0;
     } else if (dayTime < 0.3) {
       nightFactor = 1.0 - (dayTime - 0.2) / 0.1;
@@ -291,7 +294,10 @@ export class TrainController {
       nightFactor = 1.0;
     }
 
-    this.headlightBeam.intensity = nightFactor * this.headlightBaseIntensity;
-    this.headlightEmissive.emissiveIntensity = nightFactor * this.headlightBaseEmissive;
+    // On if night OR near/inside a tunnel — whichever is brighter.
+    const factor = Math.max(nightFactor, tunnelProximity);
+
+    this.headlightBeam.intensity = factor * this.headlightBaseIntensity;
+    this.headlightEmissive.emissiveIntensity = factor * this.headlightBaseEmissive;
   }
 }

@@ -847,6 +847,21 @@ function addTunnels(
     metalness: 0.05,
   });
 
+  // Wall-mounted strip lamps. Emissive only (no real lights — too expensive).
+  // Spaced every STRIP_SPACING along the tunnel, mounted on both walls.
+  const STRIP_LENGTH = 2.0;     // along tunnel direction (m)
+  const STRIP_WIDTH = 0.08;     // short cross-section axis (m)
+  const STRIP_HEIGHT = 0.05;    // depth jutting from wall (m)
+  const STRIP_LATERAL = 3.8;    // distance from centerline (m), inside r=5 tube
+  const STRIP_Y = 2.2;          // height above track (m)
+  const STRIP_SPACING = 6.0;    // arc-length between strips (m)
+  const stripGeo = new THREE.BoxGeometry(STRIP_WIDTH, STRIP_HEIGHT, STRIP_LENGTH);
+  const stripMat = new THREE.MeshStandardMaterial({
+    color: 0xfff4d8,
+    emissive: 0xfff4d8,
+    emissiveIntensity: 1.8,
+  });
+
   for (const region of tunnelRegions) {
     // Sample points along the track curve for this tunnel region
     const tubePoints: THREE.Vector3[] = [];
@@ -903,6 +918,26 @@ function addTunnels(
 
     const floorMesh = new THREE.Mesh(floorGeo, floorMat);
     segment.terrainGroup.add(floorMesh);
+
+    // Side wall strip lamps — bars on both walls, evenly spaced along tunnel.
+    const stripCount = Math.max(2, Math.floor(regionArc / STRIP_SPACING));
+    for (let i = 0; i < stripCount; i++) {
+      // Center each strip in its allotted slot
+      const localT = (i + 0.5) / stripCount;
+      const t = region.startT + localT * (region.endT - region.startT);
+      const pos = segment.getPointAt(t);
+      const tangent = segment.getTangentAt(t);
+      const lateral = new THREE.Vector3(-tangent.z, 0, tangent.x).normalize();
+
+      for (const side of [-1, 1] as const) {
+        const strip = new THREE.Mesh(stripGeo, stripMat);
+        strip.position.copy(pos)
+          .add(lateral.clone().multiplyScalar(side * STRIP_LATERAL))
+          .add(new THREE.Vector3(0, STRIP_Y, 0));
+        strip.lookAt(strip.position.clone().add(tangent));
+        segment.terrainGroup.add(strip);
+      }
+    }
   }
 }
 

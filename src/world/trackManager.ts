@@ -275,11 +275,15 @@ export class TrackManager {
    * fast the train is moving. Clamped so a stopped train still has a small
    * buffer and a fast train doesn't get a huge zone.
    */
-  getTunnelProximity(pos: TrackPosition, speed: number): number {
-    const RAMP_TIME_SECONDS = 1.2;
+  getTunnelProximity(
+    pos: TrackPosition,
+    speed: number,
+    options: { rampSeconds?: number; minRamp?: number; maxRamp?: number } = {},
+  ): number {
+    const RAMP_TIME_SECONDS = options.rampSeconds ?? 1.2;
     const FRAMES_PER_SECOND = 60; // assumed render fps; speed is m/frame
-    const MIN_RAMP = 8;
-    const MAX_RAMP = 60;
+    const MIN_RAMP = options.minRamp ?? 8;
+    const MAX_RAMP = options.maxRamp ?? 60;
     const RAMP_DISTANCE = THREE.MathUtils.clamp(
       Math.abs(speed) * RAMP_TIME_SECONDS * FRAMES_PER_SECOND,
       MIN_RAMP, MAX_RAMP,

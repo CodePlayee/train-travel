@@ -283,6 +283,10 @@ export function createSegmentVegetation(
   const signalCount = 2;
   for (let i = 0; i < signalCount; i++) {
     const t = (i + 0.5) / signalCount;
+
+    // Skip signals/houses that fall inside a tunnel — they'd be buried in the mountain.
+    if (isInTunnel(t, segment.tunnelRegions)) continue;
+
     const p = segment.getPointAt(t);
     const tangent = segment.getTangentAt(t);
     const normal = new THREE.Vector3(-tangent.z, 0, tangent.x).normalize();
@@ -299,4 +303,14 @@ export function createSegmentVegetation(
     const sigOffset = normal.clone().multiplyScalar(sigSide * 3);
     segment.vegetationGroup.add(makeSignal(p.x + sigOffset.x, p.y, p.z + sigOffset.z));
   }
+}
+
+function isInTunnel(
+  t: number,
+  regions: Array<{ startT: number; endT: number }>,
+): boolean {
+  for (const r of regions) {
+    if (t >= r.startT && t <= r.endT) return true;
+  }
+  return false;
 }
