@@ -199,27 +199,6 @@ function makeHouse(x: number, y: number, z: number, rand: () => number): THREE.G
   return house;
 }
 
-function makeSignal(x: number, y: number, z: number): THREE.Group {
-  const sig = new THREE.Group();
-
-  const pole = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.05, 0.05, 3, 6),
-    new THREE.MeshStandardMaterial({ color: 0x555555 }),
-  );
-  pole.position.y = 1.5;
-  sig.add(pole);
-
-  const light = new THREE.Mesh(
-    new THREE.SphereGeometry(0.12, 6, 6),
-    new THREE.MeshStandardMaterial({ color: 0x22cc22, emissive: 0x22cc22, emissiveIntensity: 0.5 }),
-  );
-  light.position.y = 2.8;
-  sig.add(light);
-
-  sig.position.set(x, y, z);
-  return sig;
-}
-
 /**
  * Generate vegetation for a single track segment.
  * Uses segment index as RNG seed for deterministic placement.
@@ -279,29 +258,23 @@ export function createSegmentVegetation(
     }
   }
 
-  // Houses and signals along track (1-2 per segment)
-  const signalCount = 2;
-  for (let i = 0; i < signalCount; i++) {
-    const t = (i + 0.5) / signalCount;
+  // Houses along track (occasionally, 1-2 slots per segment)
+  const houseSlotCount = 2;
+  for (let i = 0; i < houseSlotCount; i++) {
+    const t = (i + 0.5) / houseSlotCount;
 
-    // Skip signals/houses that fall inside a tunnel — they'd be buried in the mountain.
+    // Skip slots that fall inside a tunnel — would be buried in the mountain.
     if (isInTunnel(t, segment.tunnelRegions)) continue;
+
+    if (rand() >= 0.3) continue;
 
     const p = segment.getPointAt(t);
     const tangent = segment.getTangentAt(t);
     const normal = new THREE.Vector3(-tangent.z, 0, tangent.x).normalize();
 
-    // House (occasionally)
-    if (rand() < 0.3) {
-      const side = rand() < 0.5 ? 1 : -1;
-      const offset = normal.clone().multiplyScalar(side * (8 + rand() * 5));
-      segment.vegetationGroup.add(makeHouse(p.x + offset.x, p.y, p.z + offset.z, rand));
-    }
-
-    // Signal
-    const sigSide = ((i % 2) * 2 - 1);
-    const sigOffset = normal.clone().multiplyScalar(sigSide * 3);
-    segment.vegetationGroup.add(makeSignal(p.x + sigOffset.x, p.y, p.z + sigOffset.z));
+    const side = rand() < 0.5 ? 1 : -1;
+    const offset = normal.clone().multiplyScalar(side * (8 + rand() * 5));
+    segment.vegetationGroup.add(makeHouse(p.x + offset.x, p.y, p.z + offset.z, rand));
   }
 }
 
