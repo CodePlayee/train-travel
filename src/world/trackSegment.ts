@@ -19,6 +19,19 @@ export class TrackSegment {
   // Each entry is a [startT, endT] range in [0,1] curve parameter space where
   // the track is considered "inside a tunnel" (terrain above track + portal extension).
   tunnelRegions: Array<{ startT: number; endT: number }> = [];
+  // References to terrain BufferGeometries that carry the `tunnelDist` shader
+  // attribute, kept so neighbouring segments can retrofit the attribute when
+  // they discover a tunnel that crosses the shared boundary
+  // (see retrofitNeighborTunnelDistances).
+  nearTerrainGeo: THREE.BufferGeometry | null = null;
+  farTerrainGeos: THREE.BufferGeometry[] = [];
+  // Warm-white portal point lights, one at each tunnel mouth (start and end of
+  // every tunnelRegion). Populated by addTunnels() in terrain.ts. Iterated by
+  // TrackManager.updateTunnelPortalLights() each frame to toggle visibility
+  // and intensity based on night-time and proximity to the train. The array
+  // dies with the segment instance on dispose — no extra cleanup needed since
+  // the lights are children of `terrainGroup` which is removed from the scene.
+  tunnelPortalLights: THREE.PointLight[] = [];
 
   private static readonly RAIL_GAUGE = 1.2;
   private static readonly SEGMENTS = 80;

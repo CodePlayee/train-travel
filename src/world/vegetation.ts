@@ -224,6 +224,14 @@ export function createSegmentVegetation(
     // Skip objects too close to track
     if (Math.abs(lateralDist) < 8) continue;
 
+    // Skip vegetation that would sit inside a tunnel cavity. Tunnels carve a
+    // tube through the mountain ~10m wide; anything within that lateral band
+    // along a tunnel-flagged stretch of track would float in mid-air inside
+    // the tunnel (rocks especially — DodecahedronGeometry meshes appear as
+    // bright faceted white blobs against the dark tunnel interior under the
+    // headlight). The 18m clearance leaves a margin around the tube radius.
+    if (Math.abs(lateralDist) < 18 && isInTunnel(t, segment.tunnelRegions)) continue;
+
     const x = trackPoint.x + normal.x * lateralDist;
     const z = trackPoint.z + normal.z * lateralDist;
 

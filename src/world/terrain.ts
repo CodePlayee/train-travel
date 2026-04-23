@@ -130,10 +130,21 @@ function getTerrainMaterial(): THREE.Material {
  * Generate terrain strip around a single track segment.
  * Uses multi-resolution: high-detail near terrain (±40m) and low-detail far terrain (40m-300m).
  * Adapts terrain to track: deformation, bridges, and tunnels.
+ *
+ * `prevSegment`, when supplied, is used for cross-boundary tunnel handling:
+ *  - its tunnel centerline samples are folded into THIS segment's tunnelDist
+ *    so terrain near t=0 gets discarded by the previous segment's tube;
+ *  - after this segment's tunnels are detected, we retrofit prev's existing
+ *    tunnelDist attribute by taking the min with distances to OUR samples,
+ *    so a tunnel discovered here also discards terrain in prev near t=1.
+ * Without this, a mountain that straddles the segment boundary but only
+ * triggers the 10m-length threshold on one side leaves the other side's
+ * terrain undiscarded — visible as a "panel" inside the tunnel.
  */
 export function createSegmentTerrain(
   segment: TrackSegment,
   cumulativeDistance: number,
+  prevSegment?: TrackSegment,
 ): void {
   // Track data we collect per along-sample for bridge/tunnel decisions
   const trackHeights: number[] = [];
@@ -156,11 +167,19 @@ export function createSegmentTerrain(
 
   const mat = getTerrainMaterial();
 
+  // Cross-boundary samples from prev segment's tunnels — folded into our
+  // tunnelDist so terrain at our t≈0 is discarded by prev's tube.
+  const prevSamples = prevSegment ? collectTunnelSamples(prevSegment) : [];
+
   // --- Near terrain: ±NEAR_WIDTH from track center ---
-  createNearTerrain(segment, cumulativeDistance, trackHeights, tunnelRegions, mat);
+  createNearTerrain(segment, cumulativeDistance, trackHeights, tunnelRegions, mat, prevSamples);
 
   // --- Far terrain: FAR_INNER to FAR_OUTER on each side ---
-  createFarTerrain(segment, cumulativeDistance, mat);
+  // Far terrain also gets cross-segment-aware tunnel discard. Even at 80m
+  // lateral the inner edge of the far strip can curve close to a neighbouring
+  // segment's tube on tight turns, and the snow-coloured peaks left
+  // un-discarded show up as bright white panels through any tube seam.
+  createFarTerrain(segment, cumulativeDistance, mat, tunnelRegions, prevSamples);
 
   // Add bridge pillars where track is significantly above terrain
   addBridgePillars(segment, cumulativeDistance, trackHeights, naturalHeightsAtTrack, SAMPLES_ALONG);
@@ -168,9 +187,84 @@ export function createSegmentTerrain(
   // Add tunnel tubes where terrain is continuously above track
   addTunnels(segment, tunnelRegions);
 
+  // Retrofit prev segment's tunnelDist with OUR tunnel samples — handles the
+  // case where a sub-threshold mountain stub at prev's t≈1 was left as solid
+  // terrain because prev couldn't know about our tube yet.
+  if (prevSegment && tunnelRegions.length > 0) {
+    retrofitNeighborTunnelDistances(prevSegment, collectTunnelSamples(segment));
+  }
+
   // Add water plane if lake biome
   if (biomeHasWater(cumulativeDistance, segment.arcLength)) {
     addWaterSurface(segment);
+  }
+}
+
+/**
+ * Collect dense tunnel centerline samples (world-space points) for one segment.
+ * Sampled at ~1 sample per arc-length meter, matching the density used inside
+ * computeTunnelDistances. Used both for the same-segment distance pass and for
+ * cross-segment retrofits.
+ */
+function collectTunnelSamples(segment: TrackSegment): THREE.Vector3[] {
+  const out: THREE.Vector3[] = [];
+  for (const region of segment.tunnelRegions) {
+    const arcSpan = (region.endT - region.startT) * segment.arcLength;
+    const sampleCount = Math.max(8, Math.round(arcSpan));
+    for (let i = 0; i <= sampleCount; i++) {
+      const t = region.startT + (i / sampleCount) * (region.endT - region.startT);
+      out.push(segment.getPointAt(t));
+    }
+  }
+  return out;
+}
+
+/**
+ * Reduce a previously-baked segment's tunnelDist attribute by taking the min
+ * with the 3D distance to each newly-known tunnel sample. This is monotonic
+ * (distances can only get smaller), so it's safe to call multiple times and
+ * never "uncovers" a previously-discarded fragment. Used to fix terrain that
+ * was baked before the next segment's tunnel was discovered.
+ *
+ * Walks both the near-terrain geometry and any far-terrain geometries — far
+ * terrain is touched too because on tight curves it can fall within tube
+ * radius of a neighbouring tunnel.
+ */
+function retrofitNeighborTunnelDistances(
+  prev: TrackSegment,
+  newSamples: THREE.Vector3[],
+): void {
+  if (newSamples.length === 0) return;
+  const targets: THREE.BufferGeometry[] = [];
+  if (prev.nearTerrainGeo) targets.push(prev.nearTerrainGeo);
+  for (const g of prev.farTerrainGeos) targets.push(g);
+
+  for (const geo of targets) {
+    const tunnelDistAttr = geo.attributes.tunnelDist as THREE.BufferAttribute | undefined;
+    const posAttr = geo.attributes.position as THREE.BufferAttribute | undefined;
+    if (!tunnelDistAttr || !posAttr) continue;
+
+    let changed = false;
+    for (let i = 0; i < posAttr.count; i++) {
+      const vx = posAttr.getX(i);
+      const vy = posAttr.getY(i);
+      const vz = posAttr.getZ(i);
+      let minSq = Infinity;
+      for (let s = 0; s < newSamples.length; s++) {
+        const sp = newSamples[s];
+        const dx = vx - sp.x;
+        const dy = vy - sp.y;
+        const dz = vz - sp.z;
+        const d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 < minSq) minSq = d2;
+      }
+      const newD = Math.sqrt(minSq);
+      if (newD < tunnelDistAttr.getX(i)) {
+        tunnelDistAttr.setX(i, newD);
+        changed = true;
+      }
+    }
+    if (changed) tunnelDistAttr.needsUpdate = true;
   }
 }
 
@@ -184,6 +278,7 @@ function createNearTerrain(
   trackHeights: number[],
   tunnelRegions: Array<{ startT: number; endT: number }>,
   mat: THREE.Material,
+  extraTunnelSamples: THREE.Vector3[] = [],
 ): void {
   const nearGeo = new THREE.PlaneGeometry(1, 1, SAMPLES_ALONG, NEAR_SAMPLES_ACROSS);
   const nearPos = nearGeo.attributes.position;
@@ -290,11 +385,17 @@ function createNearTerrain(
   nearGeo.setAttribute('biomeIndices', new THREE.BufferAttribute(nearBiomeIndices, 3));
   nearGeo.computeVertexNormals();
   computeSteepnessAttribute(nearGeo);
-  const nearTunnelDist = computeTunnelDistances(nearGeo.attributes.position as THREE.BufferAttribute, segment, tunnelRegions);
+  const nearTunnelDist = computeTunnelDistances(
+    nearGeo.attributes.position as THREE.BufferAttribute, segment, tunnelRegions, extraTunnelSamples,
+  );
   nearGeo.setAttribute('tunnelDist', new THREE.BufferAttribute(nearTunnelDist, 1));
 
   const nearMesh = new THREE.Mesh(nearGeo, mat);
+  nearMesh.name = 'near-terrain';
   segment.terrainGroup.add(nearMesh);
+  // Stash the geometry so a later-built neighbor can fold its tunnel samples
+  // into our tunnelDist (see retrofitNeighborTunnelDistances).
+  segment.nearTerrainGeo = nearGeo;
 }
 
 /**
@@ -302,6 +403,9 @@ function createNearTerrain(
  * given set of position attributes. Used by the terrain shader to discard
  * fragments inside tunnel volumes — gives a smooth, sub-vertex hole boundary
  * without needing CSG or manifold geometry.
+ *
+ * `extraSamples` lets the caller fold in centerline points from a neighbouring
+ * segment so terrain near a shared boundary respects the neighbour's tube.
  *
  * Returns a Float32Array of length pos.count, filled with a large sentinel
  * (1e6) where no tunnel is nearby so the shader's `vTunnelDist < radius`
@@ -311,9 +415,10 @@ function computeTunnelDistances(
   pos: THREE.BufferAttribute,
   segment: TrackSegment,
   tunnelRegions: Array<{ startT: number; endT: number }>,
+  extraSamples: THREE.Vector3[] = [],
 ): Float32Array {
   const out = new Float32Array(pos.count).fill(1e6);
-  if (tunnelRegions.length === 0) return out;
+  if (tunnelRegions.length === 0 && extraSamples.length === 0) return out;
 
   // Densely sample tunnel centerlines.
   const samples: THREE.Vector3[] = [];
@@ -325,6 +430,7 @@ function computeTunnelDistances(
       samples.push(segment.getPointAt(t));
     }
   }
+  for (const s of extraSamples) samples.push(s);
 
   const v = new THREE.Vector3();
   for (let i = 0; i < pos.count; i++) {
@@ -352,6 +458,8 @@ function createFarTerrain(
   segment: TrackSegment,
   cumulativeDistance: number,
   mat: THREE.Material,
+  tunnelRegions: Array<{ startT: number; endT: number }> = [],
+  extraTunnelSamples: THREE.Vector3[] = [],
 ): void {
   for (const side of [-1, 1] as const) {
     const farGeo = new THREE.PlaneGeometry(1, 1, SAMPLES_ALONG, FAR_SAMPLES_ACROSS);
@@ -416,11 +524,19 @@ function createFarTerrain(
     farGeo.setAttribute('biomeIndices', new THREE.BufferAttribute(farBiomeIndices, 3));
     farGeo.computeVertexNormals();
     computeSteepnessAttribute(farGeo);
-    const farTunnelDist = new Float32Array(farGeo.attributes.position.count).fill(1e6);
+    // Real tunnelDist (not just the 1e6 sentinel) so the shader can punch
+    // far-terrain holes too. On gentle straights every distance is >> radius
+    // so this is effectively a no-op; on tight turns or large/long tunnels it
+    // discards the snow-coloured peaks that otherwise leak through tube seams.
+    const farTunnelDist = computeTunnelDistances(
+      farGeo.attributes.position as THREE.BufferAttribute, segment, tunnelRegions, extraTunnelSamples,
+    );
     farGeo.setAttribute('tunnelDist', new THREE.BufferAttribute(farTunnelDist, 1));
 
     const farMesh = new THREE.Mesh(farGeo, mat);
+    farMesh.name = 'far-terrain';
     segment.terrainGroup.add(farMesh);
+    segment.farTerrainGeos.push(farGeo);
   }
 }
 
@@ -766,6 +882,7 @@ function addBridgeDecks(
     geo.setIndex(indices);
 
     const deck = new THREE.Mesh(geo, concreteMat);
+    deck.name = 'bridge-deck';
     segment.terrainGroup.add(deck);
   }
 }
@@ -818,6 +935,25 @@ function detectTunnelRegions(
     }
   }
 
+  // Merge regions whose extended ranges touch or overlap.
+  // Without this, two below-terrain runs separated by a brief above-threshold
+  // bump (e.g. 2-8m apart) emit as TWO TubeGeometry meshes whose extensions
+  // intersect — producing visible polygonal cross-section "rings" at each
+  // internal boundary inside what should be one continuous tunnel.
+  if (regions.length > 1) {
+    const merged: Array<{ startT: number; endT: number }> = [regions[0]];
+    for (let i = 1; i < regions.length; i++) {
+      const prev = merged[merged.length - 1];
+      const curr = regions[i];
+      if (curr.startT <= prev.endT) {
+        prev.endT = Math.max(prev.endT, curr.endT);
+      } else {
+        merged.push(curr);
+      }
+    }
+    return merged;
+  }
+
   return regions;
 }
 
@@ -863,17 +999,79 @@ function addTunnels(
   });
 
   for (const region of tunnelRegions) {
-    // Sample points along the track curve for this tunnel region
-    const tubePoints: THREE.Vector3[] = [];
-    const steps = Math.max(8, Math.round((region.endT - region.startT) * 40));
-    for (let i = 0; i <= steps; i++) {
-      const t = region.startT + (i / steps) * (region.endT - region.startT);
-      tubePoints.push(segment.getPointAt(t));
+    // Tube wall — hand-built so neighbouring segments meet exactly at the
+    // boundary. THREE.TubeGeometry uses parallel-transport Frenet frames whose
+    // initial roll is ambiguous, so two independently-built tubes leave a
+    // visible 12-gon offset where they meet (you see the next tube's polygon
+    // silhouette through the seam, lit white by the headlight against the
+    // mountain biome's snow tint).
+    //
+    // Frame is fully determined by the local tangent, identical to the rest
+    // of the codebase:
+    //   tangent = curve.getTangentAt(t).normalize()
+    //   lateral = (-tan.z, 0, tan.x).normalize()   // always horizontal,
+    //                                              // perpendicular to tangent
+    //   up      = lateral × tangent                // right-handed, ≈+Y for
+    //                                              // near-horizontal tracks
+    // C1 continuity at segment boundaries means tangents match → both
+    // segments compute identical lateral/up → 12-gon vertices coincide.
+    //
+    // A small in-segment overlap (TUBE_OVERLAP_M each side, clamped to [0,1]
+    // so it can't spill across boundaries and z-fight a neighbour) provides
+    // depth tolerance at intra-segment tube ends.
+    const TUBE_OVERLAP_M = 0.3;
+    const overlapT = TUBE_OVERLAP_M / segment.arcLength;
+    const wallStartT = Math.max(0, region.startT - overlapT);
+    const wallEndT = Math.min(1, region.endT + overlapT);
+
+    const wallArc = (wallEndT - wallStartT) * segment.arcLength;
+    const tubularSegments = Math.max(8, Math.round(wallArc));
+    const radialSegments = 12;
+    const ringCount = tubularSegments + 1;
+    const wallVertCount = ringCount * radialSegments;
+    const wallPositions = new Float32Array(wallVertCount * 3);
+
+    for (let i = 0; i < ringCount; i++) {
+      const t = wallStartT + (i / tubularSegments) * (wallEndT - wallStartT);
+      const center = segment.getPointAt(t);
+      const tangent = segment.getTangentAt(t).normalize();
+      const lateral = new THREE.Vector3(-tangent.z, 0, tangent.x).normalize();
+      const up = new THREE.Vector3().crossVectors(lateral, tangent).normalize();
+
+      for (let k = 0; k < radialSegments; k++) {
+        const theta = (k / radialSegments) * Math.PI * 2;
+        const cs = Math.cos(theta);
+        const sn = Math.sin(theta);
+        const ix = (i * radialSegments + k) * 3;
+        wallPositions[ix + 0] = center.x + TUNNEL_RADIUS * (cs * lateral.x + sn * up.x);
+        wallPositions[ix + 1] = center.y + TUNNEL_RADIUS * (cs * lateral.y + sn * up.y);
+        wallPositions[ix + 2] = center.z + TUNNEL_RADIUS * (cs * lateral.z + sn * up.z);
+      }
     }
 
-    const tunnelCurve = new THREE.CatmullRomCurve3(tubePoints, false);
-    const tubeGeo = new THREE.TubeGeometry(tunnelCurve, steps, TUNNEL_RADIUS, 12, false);
+    // Triangulation with outward winding (CCW from outside). Material is
+    // DoubleSide so winding only matters for vertex normals from
+    // computeVertexNormals — we want them pointing OUT for proper lighting
+    // of the inside (back-face) under the train headlight.
+    const wallIndices: number[] = [];
+    for (let i = 0; i < tubularSegments; i++) {
+      for (let k = 0; k < radialSegments; k++) {
+        const kn = (k + 1) % radialSegments;
+        const a = i * radialSegments + k;
+        const b = (i + 1) * radialSegments + k;
+        const c = (i + 1) * radialSegments + kn;
+        const d = i * radialSegments + kn;
+        wallIndices.push(a, c, b);
+        wallIndices.push(a, d, c);
+      }
+    }
+
+    const tubeGeo = new THREE.BufferGeometry();
+    tubeGeo.setAttribute('position', new THREE.BufferAttribute(wallPositions, 3));
+    tubeGeo.setIndex(wallIndices);
+    tubeGeo.computeVertexNormals();
     const tubeMesh = new THREE.Mesh(tubeGeo, tunnelMat);
+    tubeMesh.name = 'tunnel-wall';
     segment.terrainGroup.add(tubeMesh);
 
     // Tunnel floor strip — a horizontal band flush with the roadbed bottom so
@@ -917,6 +1115,7 @@ function addTunnels(
     floorGeo.computeVertexNormals();
 
     const floorMesh = new THREE.Mesh(floorGeo, floorMat);
+    floorMesh.name = 'tunnel-floor';
     segment.terrainGroup.add(floorMesh);
 
     // Side wall strip lamps — bars on both walls, evenly spaced along tunnel.
@@ -931,12 +1130,32 @@ function addTunnels(
 
       for (const side of [-1, 1] as const) {
         const strip = new THREE.Mesh(stripGeo, stripMat);
+        strip.name = 'tunnel-strip-light';
         strip.position.copy(pos)
           .add(lateral.clone().multiplyScalar(side * STRIP_LATERAL))
           .add(new THREE.Vector3(0, STRIP_Y, 0));
         strip.lookAt(strip.position.clone().add(tangent));
         segment.terrainGroup.add(strip);
       }
+    }
+
+    // Portal point lights — one warm-white PointLight at each tunnel mouth
+    // (start AND end). Sits at the track centerline, raised 2.5m above rail
+    // so it's inside the upper portion of the r=5 tube. Default intensity 0;
+    // per-frame updater in TrackManager toggles intensity on when night-time
+    // AND train within ~300m. Lights are kept `visible=true` permanently —
+    // toggling `visible` changes three.js's lightsStateVersion and forces all
+    // affected materials' shaders to recompile (visible cause of stutter when
+    // crossing tunnel mouths at night). Only modulating `intensity` is free.
+    // Added to terrainGroup so they auto-detach when the segment is culled.
+    const PORTAL_LIGHT_Y = 2.5;
+    for (const portalT of [region.startT, region.endT]) {
+      const portalPos = segment.getPointAt(portalT);
+      const light = new THREE.PointLight(0xffd9a0, 0, 25, 1.5);
+      light.name = 'tunnel-portal-light';
+      light.position.set(portalPos.x, portalPos.y + PORTAL_LIGHT_Y, portalPos.z);
+      segment.terrainGroup.add(light);
+      segment.tunnelPortalLights.push(light);
     }
   }
 }

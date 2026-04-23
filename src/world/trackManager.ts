@@ -105,13 +105,19 @@ export class TrackManager {
     };
 
     const segmentStartDist = this.cumulativeDistance;
+    const prevSegment = this.segments.length > 0
+      ? this.segments[this.segments.length - 1]
+      : undefined;
     const segment = new TrackSegment(this.scene, this.nextSegmentIndex, start, end);
     this.segments.push(segment);
     this.nextSegmentIndex++;
     this.cumulativeDistance += segment.arcLength;
 
-    // Generate terrain and vegetation for this segment
-    createSegmentTerrain(segment, segmentStartDist);
+    // Generate terrain and vegetation for this segment.
+    // Pass prev so terrain.ts can stitch tunnel-discard distances across the
+    // shared boundary — avoids leftover terrain "panels" inside tunnels when a
+    // mountain straddles the boundary.
+    createSegmentTerrain(segment, segmentStartDist, prevSegment);
     createSegmentVegetation(segment, segmentStartDist);
 
     return segment;
@@ -331,6 +337,42 @@ export class TrackManager {
     if (minDist === Infinity) return 0;
     const t = THREE.MathUtils.clamp(1 - minDist / RAMP_DISTANCE, 0, 1);
     return t * t * (3 - 2 * t);
+  }
+
+  /**
+   * Toggle tunnel portal point lights based on night-time and proximity to
+   * the train. Cheap per-frame: when nightFactor<=0 we just zero all
+   * intensities. Otherwise binary on/off per light by squared distance —
+   * inside RANGE the light shines at full BASE_INTENSITY * nightFactor,
+   * outside it's 0. We deliberately never toggle `light.visible` because
+   * that changes three.js's lightsStateVersion and forces every affected
+   * material to recompile its shader (the cause of the per-tunnel-mouth
+   * stutter we observed); modulating intensity is free.
+   */
+  updateTunnelPortalLights(trainWorldPos: THREE.Vector3, nightFactor: number): void {
+    if (nightFactor <= 0) {
+      for (const seg of this.segments) {
+        for (const light of seg.tunnelPortalLights) {
+          if (light.intensity !== 0) light.intensity = 0;
+        }
+      }
+      return;
+    }
+
+    const RANGE = 300;
+    const RANGE_SQ = RANGE * RANGE;
+    const BASE_INTENSITY = 50;
+    const onIntensity = BASE_INTENSITY * nightFactor;
+
+    for (const seg of this.segments) {
+      for (const light of seg.tunnelPortalLights) {
+        const dx = light.position.x - trainWorldPos.x;
+        const dy = light.position.y - trainWorldPos.y;
+        const dz = light.position.z - trainWorldPos.z;
+        const distSq = dx * dx + dy * dy + dz * dz;
+        light.intensity = distSq <= RANGE_SQ ? onIntensity : 0;
+      }
+    }
   }
 
   /**
