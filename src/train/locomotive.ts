@@ -6,6 +6,8 @@ export interface LocomotiveResult {
   wheels: THREE.Object3D[];
   chimneyWorldPos: THREE.Vector3;
   rearCouplingLocal: THREE.Vector3;
+  headlightBeam: THREE.SpotLight;
+  headlightEmissive: THREE.MeshStandardMaterial;
 }
 
 export function createLocomotive(): LocomotiveResult {
@@ -181,10 +183,27 @@ export function createLocomotive(): LocomotiveResult {
 
   const headlight = new THREE.Mesh(
     new THREE.SphereGeometry(0.12, 8, 8),
-    new THREE.MeshStandardMaterial({ color: 0xffffaa, emissive: 0xffffaa, emissiveIntensity: 2.0 }),
+    new THREE.MeshStandardMaterial({ color: 0xffffee, emissive: 0xffffcc, emissiveIntensity: 4.0 }),
   );
   headlight.position.set(0, 1.6, 1.58);
   group.add(headlight);
+
+  // Actual SpotLight casting a long forward beam. Decay=1 (non-physical) so the
+  // beam reaches far enough to light track + tunnel walls ~80m ahead.
+  const headlightBeam = new THREE.SpotLight(
+    0xfff4d8,    // warm white
+    0.8,         // intensity (candela)
+    150,         // distance (meters)
+    Math.PI / 12, // half-angle ~15°
+    0.35,        // penumbra (soft edge)
+    1.0,         // decay
+  );
+  headlightBeam.position.set(0, 1.6, 1.6);
+  const headlightTarget = new THREE.Object3D();
+  headlightTarget.position.set(0, 0.6, 80); // 80m ahead, slightly below horizontal
+  headlightBeam.target = headlightTarget;
+  group.add(headlightBeam);
+  group.add(headlightTarget);
 
   // Wheels with spokes
   const wheelMat = new THREE.MeshStandardMaterial({ color: 0x222222, metalness: 0.7, roughness: 0.3 });
@@ -326,5 +345,12 @@ export function createLocomotive(): LocomotiveResult {
   // Store chimney position for smoke particles
   const chimneyWorldPos = new THREE.Vector3(0, 2.5, 1.2);
 
-  return { group, wheels, chimneyWorldPos, rearCouplingLocal: new THREE.Vector3(0, 0.55, -3.95) };
+  return {
+    group,
+    wheels,
+    chimneyWorldPos,
+    rearCouplingLocal: new THREE.Vector3(0, 0.55, -3.95),
+    headlightBeam,
+    headlightEmissive: headlight.material as THREE.MeshStandardMaterial,
+  };
 }

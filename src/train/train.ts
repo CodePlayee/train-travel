@@ -38,8 +38,11 @@ export class TrainController {
   private chimneyWorldPos: THREE.Vector3;
   private locomotiveGroup: THREE.Group;
 
-  // Headlight
-  private headlightSpot: THREE.SpotLight;
+  // Headlight (owned by locomotive group, controlled here based on dayTime)
+  readonly headlightBeam: THREE.SpotLight;
+  readonly headlightEmissive: THREE.MeshStandardMaterial;
+  headlightBaseIntensity = 200;
+  headlightBaseEmissive = 4.0;
 
   // Coupling drawbars
   private couplings: THREE.Mesh[] = [];
@@ -60,6 +63,8 @@ export class TrainController {
     this.locomotiveGroup = loco.group;
     this.chimneyWorldPos = loco.chimneyWorldPos;
     this.locoRearLocal = loco.rearCouplingLocal;
+    this.headlightBeam = loco.headlightBeam;
+    this.headlightEmissive = loco.headlightEmissive;
 
     // Carriages
     const carriageConfigs: [number, number][] = [
@@ -103,11 +108,10 @@ export class TrainController {
       this.smokePool.push(mesh);
     }
 
-    // Headlight spotlight
-    this.headlightSpot = new THREE.SpotLight(0xffffdd, 0, 30, Math.PI / 6, 0.5, 1);
-    this.headlightSpot.castShadow = false;
-    scene.add(this.headlightSpot);
-    scene.add(this.headlightSpot.target);
+    // Headlight intensity is controlled per-frame in updateHeadlight based on dayTime.
+    // Start dark — daytime default.
+    this.headlightBeam.intensity = 0;
+    this.headlightEmissive.emissiveIntensity = 0;
   }
 
   update(
@@ -263,11 +267,17 @@ export class TrainController {
     direction: THREE.Vector3,
     dayTime?: number,
   ): void {
+    void position;
+    void direction;
+
     if (dayTime === undefined) {
-      this.headlightSpot.intensity = 0;
+      this.headlightBeam.intensity = 0;
+      this.headlightEmissive.emissiveIntensity = 0;
       return;
     }
 
+    // dayTime: 0=midnight, 0.25=sunrise, 0.5=noon, 0.75=sunset.
+    // nightFactor: 1 at deep night, 0 during day, with smooth ramps at dawn/dusk.
     let nightFactor: number;
     if (dayTime < 0.2) {
       nightFactor = 1.0;
@@ -281,13 +291,7 @@ export class TrainController {
       nightFactor = 1.0;
     }
 
-    this.headlightSpot.intensity = nightFactor * 5;
-
-    const headlightPos = position.clone().add(direction.clone().multiplyScalar(1.5));
-    headlightPos.y += 1.6;
-    this.headlightSpot.position.copy(headlightPos);
-
-    const targetPos = headlightPos.clone().add(direction.clone().multiplyScalar(15));
-    this.headlightSpot.target.position.copy(targetPos);
+    this.headlightBeam.intensity = nightFactor * this.headlightBaseIntensity;
+    this.headlightEmissive.emissiveIntensity = nightFactor * this.headlightBaseEmissive;
   }
 }

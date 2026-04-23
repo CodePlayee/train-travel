@@ -202,6 +202,7 @@ export class SkySystem {
   private moonLight: THREE.DirectionalLight;
   private dayTime = 0.25; // Start at sunrise
   private elapsed = 0;
+  private paused = false;
   private readonly cycleDuration = 180; // seconds
 
   constructor(
@@ -286,7 +287,9 @@ export class SkySystem {
   }
 
   update(dt: number): SkyState {
-    this.dayTime = (this.dayTime + dt / this.cycleDuration) % 1;
+    if (!this.paused) {
+      this.dayTime = (this.dayTime + dt / this.cycleDuration) % 1;
+    }
     this.elapsed += dt;
 
     const sunAngle = this.dayTime * Math.PI * 2 - Math.PI / 2;
@@ -360,5 +363,17 @@ export class SkySystem {
     this.renderer.toneMappingExposure = exposure;
 
     return { dayTime: this.dayTime };
+  }
+
+  setDayTime(t: number): void {
+    this.dayTime = ((t % 1) + 1) % 1;
+  }
+
+  setPaused(paused: boolean): void {
+    this.paused = paused;
+  }
+
+  isPaused(): boolean {
+    return this.paused;
   }
 }
