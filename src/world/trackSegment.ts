@@ -70,9 +70,15 @@ export class TrackSegment {
       color: 0x555555, metalness: 0.6, roughness: 0.4,
     });
     const sleeperMat = new THREE.MeshStandardMaterial({ color: 0x4a3728 });
+    // Ballast & roadbed use vertexColors so the base verts can fade toward the
+    // surrounding terrain tone, hiding the otherwise-hard seam with the ground.
     const ballastMat = new THREE.MeshStandardMaterial({
-      color: 0x887766, roughness: 0.95, metalness: 0.0,
+      color: 0xffffff, roughness: 0.95, metalness: 0.0,
+      side: THREE.DoubleSide,
+      vertexColors: true,
     });
+    const ballastTopColor = new THREE.Color(0x887766);
+    const ballastBottomColor = new THREE.Color(0x554a3f);
 
     // Rails
     for (let side = -1; side <= 1; side += 2) {
@@ -89,196 +95,45 @@ export class TrackSegment {
       this.meshGroup.add(new THREE.Mesh(railGeo, railMat));
     }
 
-    // Ballast bed — manually constructed to keep cross-section horizontal
+    // Ballast bed (gravel) sitting on top of the roadbed.
+    // Cross-section (lateral, vertical): trapezoidal mound.
     const ballastWidth = RAIL_GAUGE + 1.4;
     const bw = ballastWidth / 2;
     const bh = 0.25;
     const ballastYOffset = -0.3;
-
-    // Cross-section vertices (in local space, left to right):
-    // 0: bottom-left (-bw, 0)
-    // 1: top-left (-bw*0.7, bh)
-    // 2: top-right (bw*0.7, bh)
-    // 3: bottom-right (bw, 0)
-    const crossSection = [
+    const ballastCrossSection = [
       { lateral: -bw, vertical: 0 },
       { lateral: -bw * 0.7, vertical: bh },
       { lateral: bw * 0.7, vertical: bh },
       { lateral: bw, vertical: 0 },
     ];
-    const csLen = crossSection.length; // 4
+    this.meshGroup.add(new THREE.Mesh(
+      this.buildTrapezoidalStrip(ballastCrossSection, ballastYOffset, ballastTopColor, ballastBottomColor),
+      ballastMat,
+    ));
 
-    const vertexCount = (SEGMENTS + 1) * csLen;
-    const positions = new Float32Array(vertexCount * 3);
-    const normals = new Float32Array(vertexCount * 3);
-
-    const up = new THREE.Vector3(0, 1, 0);
-
-    for (let i = 0; i <= SEGMENTS; i++) {
-      const t = i / SEGMENTS;
-      const pos = this.curve.getPointAt(t);
-      const tangent = this.curve.getTangentAt(t);
-      const normal = new THREE.Vector3(-tangent.z, 0, tangent.x).normalize();
-
-      for (let j = 0; j < csLen; j++) {
-        const idx = (i * csLen + j) * 3;
-        positions[idx]     = pos.x + normal.x * crossSection[j].lateral;
-        positions[idx + 1] = pos.y + ballastYOffset + crossSection[j].vertical;
-        positions[idx + 2] = pos.z + normal.z * crossSection[j].lateral;
-      }
-
-      // Normals per cross-section vertex
-      // 0 (bottom-left): left-side face normal (outward-left + down)
-      // 1 (top-left): top face normal (up)
-      // 2 (top-right): top face normal (up)
-      // 3 (bottom-right): right-side face normal (outward-right + down)
-      const leftNorm = new THREE.Vector3(
-        -normal.x * bh - up.x * (bw - bw * 0.7),
-        -normal.y * bh - up.y * (bw - bw * 0.7),
-        -normal.z * bh - up.z * (bw - bw * 0.7),
-      ).normalize().negate();
-      const rightNorm = new THREE.Vector3(
-        normal.x * bh + up.x * (bw - bw * 0.7),
-        normal.y * bh + up.y * (bw - bw * 0.7),
-        normal.z * bh + up.z * (bw - bw * 0.7),
-      ).normalize().negate();
-
-      const base = i * csLen * 3;
-      // vertex 0: left side normal
-      normals[base]     = leftNorm.x;
-      normals[base + 1] = leftNorm.y;
-      normals[base + 2] = leftNorm.z;
-      // vertex 1: up
-      normals[base + 3] = 0;
-      normals[base + 4] = 1;
-      normals[base + 5] = 0;
-      // vertex 2: up
-      normals[base + 6] = 0;
-      normals[base + 7] = 1;
-      normals[base + 8] = 0;
-      // vertex 3: right side normal
-      normals[base + 9]  = rightNorm.x;
-      normals[base + 10] = rightNorm.y;
-      normals[base + 11] = rightNorm.z;
-    }
-
-    // Build index buffer: 3 quads per segment (left side, top, right side)
-    // Each quad = 2 triangles = 6 indices
-    const indices: number[] = [];
-    for (let i = 0; i < SEGMENTS; i++) {
-      const curr = i * csLen;
-      const next = (i + 1) * csLen;
-
-      // Left side face: vertices 0-1
-      indices.push(curr + 0, next + 0, next + 1);
-      indices.push(curr + 0, next + 1, curr + 1);
-
-      // Top face: vertices 1-2
-      indices.push(curr + 1, next + 1, next + 2);
-      indices.push(curr + 1, next + 2, curr + 2);
-
-      // Right side face: vertices 2-3
-      indices.push(curr + 2, next + 2, next + 3);
-      indices.push(curr + 2, next + 3, curr + 3);
-    }
-
-    const ballastGeo = new THREE.BufferGeometry();
-    ballastGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    ballastGeo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
-    ballastGeo.setIndex(indices);
-    this.meshGroup.add(new THREE.Mesh(ballastGeo, ballastMat));
-
-    // Roadbed (路基) — wider trapezoidal foundation beneath the ballast
+    // Roadbed (路基) — wider trapezoidal foundation beneath the ballast.
     const roadbedMat = new THREE.MeshStandardMaterial({
-      color: 0x6b5b4f, roughness: 0.95, metalness: 0.0,
+      color: 0xffffff, roughness: 0.95, metalness: 0.0,
+      side: THREE.DoubleSide,
+      vertexColors: true,
     });
-
-    const roadbedTopWidth = 2.5;         // half-width at top (5m total)
-    const roadbedBottomWidth = 4.0;      // half-width at bottom (8m total)
-    const roadbedHeight = 0.6;
-    const roadbedYOffset = -0.8;         // top at pos.y - 0.2, bottom at pos.y - 0.8
-
-    // Cross-section vertices (left to right):
-    // 0: bottom-left (-roadbedBottomWidth, 0)
-    // 1: top-left (-roadbedTopWidth, roadbedHeight)
-    // 2: top-right (roadbedTopWidth, roadbedHeight)
-    // 3: bottom-right (roadbedBottomWidth, 0)
-    const rbCrossSection = [
+    const roadbedTopColor = new THREE.Color(0x6b5b4f);
+    const roadbedBottomColor = new THREE.Color(0x3d342b);
+    const roadbedTopWidth = 1.4;       // half-width at top (2.8m total)
+    const roadbedBottomWidth = 2.0;    // half-width at bottom (4.0m total)
+    const roadbedHeight = 0.6;         // visible vertical mound
+    const roadbedYOffset = -0.8;       // top at pos.y - 0.2, bottom at pos.y - 0.8
+    const roadbedCrossSection = [
       { lateral: -roadbedBottomWidth, vertical: 0 },
       { lateral: -roadbedTopWidth, vertical: roadbedHeight },
       { lateral: roadbedTopWidth, vertical: roadbedHeight },
       { lateral: roadbedBottomWidth, vertical: 0 },
     ];
-    const rbCsLen = rbCrossSection.length;
-
-    const rbVertexCount = (SEGMENTS + 1) * rbCsLen;
-    const rbPositions = new Float32Array(rbVertexCount * 3);
-    const rbNormals = new Float32Array(rbVertexCount * 3);
-
-    for (let i = 0; i <= SEGMENTS; i++) {
-      const t = i / SEGMENTS;
-      const pos = this.curve.getPointAt(t);
-      const tangent = this.curve.getTangentAt(t);
-      const normal = new THREE.Vector3(-tangent.z, 0, tangent.x).normalize();
-
-      for (let j = 0; j < rbCsLen; j++) {
-        const idx = (i * rbCsLen + j) * 3;
-        rbPositions[idx]     = pos.x + normal.x * rbCrossSection[j].lateral;
-        rbPositions[idx + 1] = pos.y + roadbedYOffset + rbCrossSection[j].vertical;
-        rbPositions[idx + 2] = pos.z + normal.z * rbCrossSection[j].lateral;
-      }
-
-      // Normals: left slope, top (up), top (up), right slope
-      const lateralDiff = roadbedBottomWidth - roadbedTopWidth;
-      const rbLeftNorm = new THREE.Vector3(
-        -normal.x * roadbedHeight - up.x * lateralDiff,
-        -normal.y * roadbedHeight - up.y * lateralDiff,
-        -normal.z * roadbedHeight - up.z * lateralDiff,
-      ).normalize().negate();
-      const rbRightNorm = new THREE.Vector3(
-        normal.x * roadbedHeight + up.x * lateralDiff,
-        normal.y * roadbedHeight + up.y * lateralDiff,
-        normal.z * roadbedHeight + up.z * lateralDiff,
-      ).normalize().negate();
-
-      const base = i * rbCsLen * 3;
-      rbNormals[base]     = rbLeftNorm.x;
-      rbNormals[base + 1] = rbLeftNorm.y;
-      rbNormals[base + 2] = rbLeftNorm.z;
-      rbNormals[base + 3] = 0;
-      rbNormals[base + 4] = 1;
-      rbNormals[base + 5] = 0;
-      rbNormals[base + 6] = 0;
-      rbNormals[base + 7] = 1;
-      rbNormals[base + 8] = 0;
-      rbNormals[base + 9]  = rbRightNorm.x;
-      rbNormals[base + 10] = rbRightNorm.y;
-      rbNormals[base + 11] = rbRightNorm.z;
-    }
-
-    const rbIndices: number[] = [];
-    for (let i = 0; i < SEGMENTS; i++) {
-      const curr = i * rbCsLen;
-      const next = (i + 1) * rbCsLen;
-
-      // Left side face: vertices 0-1
-      rbIndices.push(curr + 0, next + 0, next + 1);
-      rbIndices.push(curr + 0, next + 1, curr + 1);
-
-      // Top face: vertices 1-2
-      rbIndices.push(curr + 1, next + 1, next + 2);
-      rbIndices.push(curr + 1, next + 2, curr + 2);
-
-      // Right side face: vertices 2-3
-      rbIndices.push(curr + 2, next + 2, next + 3);
-      rbIndices.push(curr + 2, next + 3, curr + 3);
-    }
-
-    const roadbedGeo = new THREE.BufferGeometry();
-    roadbedGeo.setAttribute('position', new THREE.BufferAttribute(rbPositions, 3));
-    roadbedGeo.setAttribute('normal', new THREE.BufferAttribute(rbNormals, 3));
-    roadbedGeo.setIndex(rbIndices);
-    this.meshGroup.add(new THREE.Mesh(roadbedGeo, roadbedMat));
+    this.meshGroup.add(new THREE.Mesh(
+      this.buildTrapezoidalStrip(roadbedCrossSection, roadbedYOffset, roadbedTopColor, roadbedBottomColor),
+      roadbedMat,
+    ));
 
     // Sleepers — use InstancedMesh for performance (single draw call)
     const sleeperGeo = new THREE.BoxGeometry(RAIL_GAUGE + 0.6, 0.08, 0.2);
@@ -297,6 +152,99 @@ export class TrackSegment {
     }
     sleeperInstanced.instanceMatrix.needsUpdate = true;
     this.meshGroup.add(sleeperInstanced);
+  }
+
+  /**
+   * Build a trapezoidal strip following the segment curve.
+   * Cross-section vertices must be ordered LEFT-to-RIGHT (negative lateral first).
+   * Faces emitted: left slope, top, right slope. The bottom face is omitted —
+   * it is buried in terrain and never visible, and including it would average
+   * a downward-facing normal into the bottom corner verts (since they are
+   * shared with the side slopes), which makes the base appear nearly black
+   * under noon-overhead sun.
+   * Optional vertex colors fade from `colorTop` at the top verts to
+   * `colorBottom` at the bottom verts so the seam with surrounding terrain
+   * blends instead of forming a hard line.
+   */
+  private buildTrapezoidalStrip(
+    crossSection: { lateral: number; vertical: number }[],
+    baseYOffset: number,
+    colorTop?: THREE.Color,
+    colorBottom?: THREE.Color,
+  ): THREE.BufferGeometry {
+    const { SEGMENTS } = TrackSegment;
+    const csLen = crossSection.length; // expect 4
+
+    const vertexCount = (SEGMENTS + 1) * csLen;
+    const positions = new Float32Array(vertexCount * 3);
+    const useColors = !!(colorTop && colorBottom);
+    const colors = useColors ? new Float32Array(vertexCount * 3) : null;
+
+    // Determine which cross-section indices are "top" vs "bottom" by their
+    // vertical coordinate so we can assign vertex colors correctly.
+    let maxV = -Infinity;
+    let minV = Infinity;
+    for (const cs of crossSection) {
+      if (cs.vertical > maxV) maxV = cs.vertical;
+      if (cs.vertical < minV) minV = cs.vertical;
+    }
+    const vRange = Math.max(1e-6, maxV - minV);
+
+    for (let i = 0; i <= SEGMENTS; i++) {
+      const t = i / SEGMENTS;
+      const pos = this.curve.getPointAt(t);
+      const tangent = this.curve.getTangentAt(t);
+      const lateral = new THREE.Vector3(-tangent.z, 0, tangent.x).normalize();
+
+      for (let j = 0; j < csLen; j++) {
+        const idx = (i * csLen + j) * 3;
+        positions[idx]     = pos.x + lateral.x * crossSection[j].lateral;
+        positions[idx + 1] = pos.y + baseYOffset + crossSection[j].vertical;
+        positions[idx + 2] = pos.z + lateral.z * crossSection[j].lateral;
+
+        if (colors && colorTop && colorBottom) {
+          const f = (crossSection[j].vertical - minV) / vRange; // 0=bottom, 1=top
+          const r = colorBottom.r + (colorTop.r - colorBottom.r) * f;
+          const g = colorBottom.g + (colorTop.g - colorBottom.g) * f;
+          const b = colorBottom.b + (colorTop.b - colorBottom.b) * f;
+          colors[idx]     = r;
+          colors[idx + 1] = g;
+          colors[idx + 2] = b;
+        }
+      }
+    }
+
+    // Build index buffer with CCW outward winding for the visible faces only.
+    // Cross-section index layout (left-to-right): 0=BL, 1=TL, 2=TR, 3=BR.
+    // The curve advances along its tangent direction (curr -> next).
+    // Outward normal directions: left face -> -lateral+up, top -> +up,
+    // right face -> +lateral+up. Bottom face is intentionally omitted.
+    const indices: number[] = [];
+    for (let i = 0; i < SEGMENTS; i++) {
+      const curr = i * csLen;
+      const next = (i + 1) * csLen;
+
+      // Left slope (BL <-> TL): outward = -lateral + up
+      indices.push(curr + 0, next + 1, next + 0);
+      indices.push(curr + 0, curr + 1, next + 1);
+
+      // Top (TL <-> TR): outward = +up
+      indices.push(curr + 1, next + 2, next + 1);
+      indices.push(curr + 1, curr + 2, next + 2);
+
+      // Right slope (TR <-> BR): outward = +lateral + up
+      indices.push(curr + 2, next + 3, next + 2);
+      indices.push(curr + 2, curr + 3, next + 3);
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    if (colors) {
+      geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    }
+    geo.setIndex(indices);
+    geo.computeVertexNormals();
+    return geo;
   }
 
   getPointAt(t: number): THREE.Vector3 {

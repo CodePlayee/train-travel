@@ -7,7 +7,7 @@ import { createTerrainMaterial } from './terrainShader';
 // Terrain adaptation thresholds
 const HEIGHT_DIFF_THRESHOLD = 5; // meters — beyond this, use bridge or tunnel
 const DEFORM_RADIUS = 60; // lateral distance over which terrain deforms toward track
-const TRACK_BED_HALF_WIDTH = 6; // half-width of flat track bed area
+const TRACK_BED_HALF_WIDTH = 2.0; // half-width of flat area at base of roadbed (matches roadbedBottomWidth)
 const EMBANKMENT_WIDTH = 12; // width of raised embankment zone around track
 const BRIDGE_PILLAR_SPACING = 15; // world units between bridge pillars
 const TUNNEL_MIN_LENGTH = 10; // minimum continuous length (meters) to qualify as tunnel
@@ -226,8 +226,10 @@ function createNearTerrain(
       if (inTunnelZone) {
         // Tunnel zone: terrain stays at natural height
       } else {
-        // Continuous road-aware terrain blending
-        const trackBedH = trackH - 1.0;
+        // Continuous road-aware terrain blending.
+        // The terrain is shaped to meet the BASE of the roadbed (trackH - 1.2) within the
+        // roadbed footprint, so the roadbed's trapezoidal mound stays clearly visible above ground.
+        const trackBedH = trackH - 0.8;
         const absDiff = Math.abs(heightDiff);
         const influenceT = Math.min(1, absDiff / (HEIGHT_DIFF_THRESHOLD * 2));
         const heightInfluence = 1.0 - influenceT * influenceT * influenceT *
@@ -249,9 +251,10 @@ function createNearTerrain(
           h = THREE.MathUtils.lerp(naturalH, deformedH, heightInfluence);
         }
 
-        // Color: darken near track to suggest gravel/earth
-        if (lateralDist < EMBANKMENT_WIDTH && heightInfluence > 0.1) {
-          const darkT = (1 - lateralDist / EMBANKMENT_WIDTH) * heightInfluence;
+        // Color: darken near track to suggest gravel/earth — confined to roadbed footprint
+        // so we don't paint dirt on bare grass beyond the embankment toe.
+        if (lateralDist < TRACK_BED_HALF_WIDTH && heightInfluence > 0.1) {
+          const darkT = (1 - lateralDist / TRACK_BED_HALF_WIDTH) * heightInfluence;
           col.r = THREE.MathUtils.lerp(col.r, 0.35, darkT * 0.3);
           col.g = THREE.MathUtils.lerp(col.g, 0.30, darkT * 0.3);
           col.b = THREE.MathUtils.lerp(col.b, 0.25, darkT * 0.3);
@@ -532,6 +535,11 @@ function addBridgePillars(
     }
   }
 
+  // Continuous bridge deck slabs spanning contiguous bridge runs.
+  // Detect runs by re-scanning along the segment at higher density than pillarCount,
+  // so each contiguous "above terrain" stretch gets one strip mesh.
+  addBridgeDecks(segment, trackHeights, naturalHeights, samplesAlong, concreteMat);
+
   // Guardrails connecting adjacent bridge pillars
   if (bridgePoints.length >= 2) {
     for (let i = 0; i < bridgePoints.length - 1; i++) {
@@ -574,6 +582,137 @@ function addBridgePillars(
         }
       }
     }
+  }
+}
+
+/**
+ * Build continuous bridge deck slabs: for each contiguous along-segment run where
+ * the track is on a bridge (trackH - terrainH > HEIGHT_DIFF_THRESHOLD), emit one
+ * curved strip mesh that follows the track curve. This visually supports the roadbed
+ * and fills the gaps between the discrete cap beams.
+ */
+function addBridgeDecks(
+  segment: TrackSegment,
+  trackHeights: number[],
+  naturalHeights: number[],
+  samplesAlong: number,
+  concreteMat: THREE.Material,
+): void {
+  // Re-sample bridge state at the same resolution as the height arrays.
+  const isBridge: boolean[] = [];
+  for (let i = 0; i <= samplesAlong; i++) {
+    isBridge.push((trackHeights[i] - naturalHeights[i]) > HEIGHT_DIFF_THRESHOLD);
+  }
+
+  // Find contiguous runs.
+  const runs: Array<{ startT: number; endT: number }> = [];
+  let runStart = -1;
+  for (let i = 0; i <= samplesAlong; i++) {
+    if (isBridge[i] && runStart < 0) {
+      runStart = i;
+    } else if (!isBridge[i] && runStart >= 0) {
+      runs.push({ startT: runStart / samplesAlong, endT: (i - 1) / samplesAlong });
+      runStart = -1;
+    }
+  }
+  if (runStart >= 0) {
+    runs.push({ startT: runStart / samplesAlong, endT: 1 });
+  }
+
+  // Deck dimensions — slightly wider than the cap beam so it's clearly visible from the side,
+  // sits just below the roadbed bottom, thicker so the supporting plane reads at a distance.
+  const DECK_HALF_WIDTH = 2.5;           // 5m total, matches roadbed top width
+  const DECK_THICKNESS = 0.8;
+  const DECK_TOP_OFFSET = -0.8;          // deck top sits flush with new roadbed bottom
+  const DECK_BOTTOM_OFFSET = DECK_TOP_OFFSET - DECK_THICKNESS;
+
+  for (const run of runs) {
+    const runLength = (run.endT - run.startT) * segment.arcLength;
+    if (runLength < 1) continue; // ignore degenerate single-sample runs
+
+    // Sample the curve densely along the run for a smooth strip.
+    const steps = Math.max(4, Math.round(runLength / 2));
+    const csLen = 4; // 4 cross-section verts: BL, TL, TR, BR
+    const vertexCount = (steps + 1) * csLen;
+    const positions = new Float32Array(vertexCount * 3);
+    const normals = new Float32Array(vertexCount * 3);
+
+    for (let i = 0; i <= steps; i++) {
+      const tLocal = i / steps;
+      const t = run.startT + tLocal * (run.endT - run.startT);
+      const pos = segment.getPointAt(t);
+      const tangent = segment.getTangentAt(t);
+      const lateral = new THREE.Vector3(-tangent.z, 0, tangent.x).normalize();
+
+      const topY = pos.y + DECK_TOP_OFFSET;
+      const botY = pos.y + DECK_BOTTOM_OFFSET;
+
+      const base = i * csLen * 3;
+
+      // 0: bottom-left
+      positions[base + 0] = pos.x + lateral.x * -DECK_HALF_WIDTH;
+      positions[base + 1] = botY;
+      positions[base + 2] = pos.z + lateral.z * -DECK_HALF_WIDTH;
+      // 1: top-left
+      positions[base + 3] = pos.x + lateral.x * -DECK_HALF_WIDTH;
+      positions[base + 4] = topY;
+      positions[base + 5] = pos.z + lateral.z * -DECK_HALF_WIDTH;
+      // 2: top-right
+      positions[base + 6] = pos.x + lateral.x * DECK_HALF_WIDTH;
+      positions[base + 7] = topY;
+      positions[base + 8] = pos.z + lateral.z * DECK_HALF_WIDTH;
+      // 3: bottom-right
+      positions[base + 9]  = pos.x + lateral.x * DECK_HALF_WIDTH;
+      positions[base + 10] = botY;
+      positions[base + 11] = pos.z + lateral.z * DECK_HALF_WIDTH;
+
+      // Normals: left-out, up, up, right-out
+      normals[base + 0] = -lateral.x;
+      normals[base + 1] = 0;
+      normals[base + 2] = -lateral.z;
+      normals[base + 3] = 0;
+      normals[base + 4] = 1;
+      normals[base + 5] = 0;
+      normals[base + 6] = 0;
+      normals[base + 7] = 1;
+      normals[base + 8] = 0;
+      normals[base + 9]  = lateral.x;
+      normals[base + 10] = 0;
+      normals[base + 11] = lateral.z;
+    }
+
+    // Index buffer: left side, top, right side (skip bottom — never visible).
+    const indices: number[] = [];
+    for (let i = 0; i < steps; i++) {
+      const curr = i * csLen;
+      const next = (i + 1) * csLen;
+      // Left side: 0-1
+      indices.push(curr + 0, next + 0, next + 1);
+      indices.push(curr + 0, next + 1, curr + 1);
+      // Top: 1-2
+      indices.push(curr + 1, next + 1, next + 2);
+      indices.push(curr + 1, next + 2, curr + 2);
+      // Right side: 2-3
+      indices.push(curr + 2, next + 2, next + 3);
+      indices.push(curr + 2, next + 3, curr + 3);
+    }
+
+    // End caps (front + back) so the slab doesn't look hollow at run boundaries.
+    const lastBase = steps * csLen;
+    // Start cap (i=0): bottom-left, top-left, top-right, bottom-right (0,1,2,3)
+    indices.push(0, 2, 1);
+    indices.push(0, 3, 2);
+    // End cap (i=steps): reverse winding
+    indices.push(lastBase + 0, lastBase + 1, lastBase + 2);
+    indices.push(lastBase + 0, lastBase + 2, lastBase + 3);
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+    geo.setIndex(indices);
+
+    const deck = new THREE.Mesh(geo, concreteMat);
+    segment.terrainGroup.add(deck);
   }
 }
 
