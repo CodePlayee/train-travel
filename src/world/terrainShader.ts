@@ -8,17 +8,23 @@ export function createTerrainMaterial(): THREE.MeshStandardMaterial {
   });
 
   material.onBeforeCompile = (shader) => {
+    // Tunnel hole radius — must stay in sync with TUNNEL_RADIUS in terrain.ts.
+    // Hard-coded here to avoid a circular import; bump both together if changed.
+    shader.uniforms.uTunnelHoleRadius = { value: 5.0 };
+
     // --- Vertex shader injection ---
     // Declare attributes and varyings before main()
     const vertexPreamble = /* glsl */ `
       attribute vec3 biomeWeights;
       attribute vec3 biomeIndices;
       attribute float steepness;
+      attribute float tunnelDist;
 
       varying vec3 vBiomeWeights;
       varying vec3 vBiomeIndices;
       varying float vSteepness;
       varying vec2 vWorldPos;
+      varying float vTunnelDist;
     `;
 
     shader.vertexShader = vertexPreamble + shader.vertexShader;
@@ -29,6 +35,7 @@ export function createTerrainMaterial(): THREE.MeshStandardMaterial {
       vBiomeIndices = biomeIndices;
       vSteepness = steepness;
       vWorldPos = (modelMatrix * vec4(position, 1.0)).xz;
+      vTunnelDist = tunnelDist;
     `;
 
     shader.vertexShader = shader.vertexShader.replace(
@@ -42,6 +49,8 @@ export function createTerrainMaterial(): THREE.MeshStandardMaterial {
       varying vec3 vBiomeIndices;
       varying float vSteepness;
       varying vec2 vWorldPos;
+      varying float vTunnelDist;
+      uniform float uTunnelHoleRadius;
 
       float terrainHash(vec2 p) {
         return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
@@ -111,6 +120,13 @@ export function createTerrainMaterial(): THREE.MeshStandardMaterial {
     `;
 
     shader.fragmentShader = fragmentPreamble + shader.fragmentShader;
+
+    // Discard fragments inside tunnel volume — gives a smooth, sub-vertex
+    // tunnel hole boundary without modifying geometry.
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <clipping_planes_fragment>',
+      '#include <clipping_planes_fragment>\n      if (vTunnelDist < uTunnelHoleRadius) discard;'
+    );
 
     // Replace diffuseColor after color_fragment
     const fragmentColorInject = /* glsl */ `

@@ -289,9 +289,58 @@ function createNearTerrain(
   nearGeo.setAttribute('biomeIndices', new THREE.BufferAttribute(nearBiomeIndices, 3));
   nearGeo.computeVertexNormals();
   computeSteepnessAttribute(nearGeo);
+  const nearTunnelDist = computeTunnelDistances(nearGeo.attributes.position as THREE.BufferAttribute, segment, tunnelRegions);
+  nearGeo.setAttribute('tunnelDist', new THREE.BufferAttribute(nearTunnelDist, 1));
 
   const nearMesh = new THREE.Mesh(nearGeo, mat);
   segment.terrainGroup.add(nearMesh);
+}
+
+/**
+ * Compute per-vertex 3D distance to the nearest tunnel centerline sample for a
+ * given set of position attributes. Used by the terrain shader to discard
+ * fragments inside tunnel volumes — gives a smooth, sub-vertex hole boundary
+ * without needing CSG or manifold geometry.
+ *
+ * Returns a Float32Array of length pos.count, filled with a large sentinel
+ * (1e6) where no tunnel is nearby so the shader's `vTunnelDist < radius`
+ * test passes through.
+ */
+function computeTunnelDistances(
+  pos: THREE.BufferAttribute,
+  segment: TrackSegment,
+  tunnelRegions: Array<{ startT: number; endT: number }>,
+): Float32Array {
+  const out = new Float32Array(pos.count).fill(1e6);
+  if (tunnelRegions.length === 0) return out;
+
+  // Densely sample tunnel centerlines.
+  const samples: THREE.Vector3[] = [];
+  for (const region of tunnelRegions) {
+    const arcSpan = (region.endT - region.startT) * segment.arcLength;
+    const sampleCount = Math.max(8, Math.round(arcSpan));
+    for (let i = 0; i <= sampleCount; i++) {
+      const t = region.startT + (i / sampleCount) * (region.endT - region.startT);
+      samples.push(segment.getPointAt(t));
+    }
+  }
+
+  const v = new THREE.Vector3();
+  for (let i = 0; i < pos.count; i++) {
+    v.set(pos.getX(i), pos.getY(i), pos.getZ(i));
+    let minSq = Infinity;
+    for (let s = 0; s < samples.length; s++) {
+      const sp = samples[s];
+      const dx = v.x - sp.x;
+      const dy = v.y - sp.y;
+      const dz = v.z - sp.z;
+      const d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 < minSq) minSq = d2;
+    }
+    out[i] = Math.sqrt(minSq);
+  }
+
+  return out;
 }
 
 /**
@@ -366,6 +415,8 @@ function createFarTerrain(
     farGeo.setAttribute('biomeIndices', new THREE.BufferAttribute(farBiomeIndices, 3));
     farGeo.computeVertexNormals();
     computeSteepnessAttribute(farGeo);
+    const farTunnelDist = new Float32Array(farGeo.attributes.position.count).fill(1e6);
+    farGeo.setAttribute('tunnelDist', new THREE.BufferAttribute(farTunnelDist, 1));
 
     const farMesh = new THREE.Mesh(farGeo, mat);
     segment.terrainGroup.add(farMesh);
@@ -778,19 +829,19 @@ function addTunnels(
   segment: TrackSegment,
   tunnelRegions: Array<{ startT: number; endT: number }>,
 ): void {
+  // Tube radius 5, floor sits 0.8m below center → max chord half-width
+  // = sqrt(5² − 0.8²) ≈ 4.94m. 4.5 gives a comfortable margin from the tube wall.
+  const FLOOR_HALF_WIDTH = 4.5;
+  const FLOOR_Y_OFFSET = -0.8;
+
   const tunnelMat = new THREE.MeshStandardMaterial({
     color: 0x555550,
     roughness: 0.85,
     metalness: 0.1,
     side: THREE.DoubleSide,
   });
-  const portalMat = new THREE.MeshStandardMaterial({
-    color: 0x665544,
-    roughness: 0.9,
-    metalness: 0.05,
-  });
-  const keystoneMat = new THREE.MeshStandardMaterial({
-    color: 0x887766,
+  const floorMat = new THREE.MeshStandardMaterial({
+    color: 0x4a4642,
     roughness: 0.85,
     metalness: 0.05,
   });
@@ -809,58 +860,48 @@ function addTunnels(
     const tubeMesh = new THREE.Mesh(tubeGeo, tunnelMat);
     segment.terrainGroup.add(tubeMesh);
 
-    // Add portal arches at each end of the tunnel
-    const portalEnds: Array<{ t: number; sign: number }> = [];
-    if (region.startT > 0.01) portalEnds.push({ t: region.startT, sign: 1 });
-    if (region.endT < 0.99) portalEnds.push({ t: region.endT, sign: -1 });
+    // Tunnel floor strip — a horizontal band flush with the roadbed bottom so
+    // the tube doesn't look like a hollow drainpipe from inside the train.
+    const regionArc = (region.endT - region.startT) * segment.arcLength;
+    const floorSteps = Math.max(8, Math.round(regionArc / 2));
+    const floorVertCount = (floorSteps + 1) * 2;
+    const floorPositions = new Float32Array(floorVertCount * 3);
 
-    for (const portal of portalEnds) {
-      const portalPoint = segment.getPointAt(portal.t);
-      const tangent = segment.getTangentAt(portal.t);
-      const normal = new THREE.Vector3(-tangent.z, 0, tangent.x).normalize();
+    for (let i = 0; i <= floorSteps; i++) {
+      const t = region.startT + (i / floorSteps) * (region.endT - region.startT);
+      const pos = segment.getPointAt(t);
+      const tangent = segment.getTangentAt(t);
+      const lateral = new THREE.Vector3(-tangent.z, 0, tangent.x).normalize();
+      const y = pos.y + FLOOR_Y_OFFSET;
 
-      // Portal arch (torus segment forming archway)
-      const archRadius = TUNNEL_RADIUS + 0.5;
-      const archGeo = new THREE.TorusGeometry(archRadius, 0.6, 6, 12, Math.PI);
-      const arch = new THREE.Mesh(archGeo, portalMat);
-      arch.position.set(portalPoint.x, portalPoint.y, portalPoint.z);
-
-      // Orient arch to face outward along track
-      const lookTarget = new THREE.Vector3(
-        portalPoint.x + tangent.x * portal.sign,
-        portalPoint.y,
-        portalPoint.z + tangent.z * portal.sign,
-      );
-      arch.lookAt(lookTarget);
-      arch.rotateX(Math.PI / 2);
-      segment.terrainGroup.add(arch);
-
-      // Portal side pillars (stone columns flanking the entrance)
-      for (const side of [-1, 1]) {
-        const pillarX = portalPoint.x + normal.x * side * (TUNNEL_RADIUS - 0.5);
-        const pillarZ = portalPoint.z + normal.z * side * (TUNNEL_RADIUS - 0.5);
-        const pillarGeo = new THREE.BoxGeometry(0.8, TUNNEL_RADIUS * 1.5, 0.8);
-        const pillar = new THREE.Mesh(pillarGeo, portalMat);
-        pillar.position.set(
-          pillarX,
-          portalPoint.y - TUNNEL_RADIUS * 0.25,
-          pillarZ,
-        );
-        segment.terrainGroup.add(pillar);
-      }
-
-      // Keystone at top of arch
-      const keystone = new THREE.Mesh(
-        new THREE.BoxGeometry(0.6, 0.8, 0.8),
-        keystoneMat,
-      );
-      keystone.position.set(
-        portalPoint.x,
-        portalPoint.y + archRadius - 0.3,
-        portalPoint.z,
-      );
-      segment.terrainGroup.add(keystone);
+      const base = i * 2 * 3;
+      // left vertex
+      floorPositions[base + 0] = pos.x + lateral.x * -FLOOR_HALF_WIDTH;
+      floorPositions[base + 1] = y;
+      floorPositions[base + 2] = pos.z + lateral.z * -FLOOR_HALF_WIDTH;
+      // right vertex
+      floorPositions[base + 3] = pos.x + lateral.x * FLOOR_HALF_WIDTH;
+      floorPositions[base + 4] = y;
+      floorPositions[base + 5] = pos.z + lateral.z * FLOOR_HALF_WIDTH;
     }
+
+    // Triangulate so face normals point +Y (single-sided, top-only).
+    // For tangent=+X: lateral=+Z, left vertex at -Z, right at +Z.
+    // Triangle (curr_left, curr_right, next_right): edges (+2Z, -X+Z) → cross = (0,+,0). ✓
+    const floorIndices: number[] = [];
+    for (let i = 1; i <= floorSteps; i++) {
+      const base = (i - 1) * 2;
+      floorIndices.push(base, base + 1, base + 3);
+      floorIndices.push(base, base + 3, base + 2);
+    }
+
+    const floorGeo = new THREE.BufferGeometry();
+    floorGeo.setAttribute('position', new THREE.BufferAttribute(floorPositions, 3));
+    floorGeo.setIndex(floorIndices);
+    floorGeo.computeVertexNormals();
+
+    const floorMesh = new THREE.Mesh(floorGeo, floorMat);
+    segment.terrainGroup.add(floorMesh);
   }
 }
 
