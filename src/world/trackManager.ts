@@ -266,6 +266,70 @@ export class TrackManager {
   }
 
   /**
+   * Returns 0..1 proximity to nearest tunnel — 1 inside tunnel, 0 farther than
+   * the ramp distance away. Smoothstep ramp. Used by camera to blend toward
+   * cab view so the camera doesn't poke through mountain meshes near tunnels.
+   *
+   * Ramp distance scales with `speed` (m/frame) so the camera transition
+   * spans a roughly constant *time* (~RAMP_TIME_SECONDS) regardless of how
+   * fast the train is moving. Clamped so a stopped train still has a small
+   * buffer and a fast train doesn't get a huge zone.
+   */
+  getTunnelProximity(pos: TrackPosition, speed: number): number {
+    const RAMP_TIME_SECONDS = 1.2;
+    const FRAMES_PER_SECOND = 60; // assumed render fps; speed is m/frame
+    const MIN_RAMP = 8;
+    const MAX_RAMP = 60;
+    const RAMP_DISTANCE = THREE.MathUtils.clamp(
+      Math.abs(speed) * RAMP_TIME_SECONDS * FRAMES_PER_SECOND,
+      MIN_RAMP, MAX_RAMP,
+    );
+    const current = this.getSegment(pos.segmentIndex);
+    if (!current) return 0;
+
+    const trainArcInCurrent = pos.localT * current.arcLength;
+    let minDist = Infinity;
+
+    for (const offset of [-1, 0, 1, 2]) {
+      const seg = this.getSegment(pos.segmentIndex + offset);
+      if (!seg) continue;
+
+      // Compute arc-length offset from start of `current` to start of `seg`.
+      let segArcOffset = 0;
+      if (offset > 0) {
+        for (let k = 0; k < offset; k++) {
+          const s = this.getSegment(pos.segmentIndex + k);
+          if (!s) { segArcOffset = NaN; break; }
+          segArcOffset += s.arcLength;
+        }
+      } else if (offset < 0) {
+        for (let k = -1; k >= offset; k--) {
+          const s = this.getSegment(pos.segmentIndex + k);
+          if (!s) { segArcOffset = NaN; break; }
+          segArcOffset -= s.arcLength;
+        }
+      }
+      if (Number.isNaN(segArcOffset)) continue;
+
+      const trainArcInThisSeg = trainArcInCurrent - segArcOffset;
+
+      for (const region of seg.tunnelRegions) {
+        const regStart = region.startT * seg.arcLength;
+        const regEnd = region.endT * seg.arcLength;
+        let d: number;
+        if (trainArcInThisSeg < regStart) d = regStart - trainArcInThisSeg;
+        else if (trainArcInThisSeg > regEnd) d = trainArcInThisSeg - regEnd;
+        else d = 0;
+        if (d < minDist) minDist = d;
+      }
+    }
+
+    if (minDist === Infinity) return 0;
+    const t = THREE.MathUtils.clamp(1 - minDist / RAMP_DISTANCE, 0, 1);
+    return t * t * (3 - 2 * t);
+  }
+
+  /**
    * Find segment by index.
    */
   private getSegment(index: number): TrackSegment | undefined {

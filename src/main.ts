@@ -34,7 +34,8 @@ function init(): void {
     // Update track: generate ahead, cull behind
     trackManager.update(trainState.trackPosition, camera);
 
-    cameraController.update(trainState.position, trainState.direction);
+    const tunnelProximity = trackManager.getTunnelProximity(trainState.trackPosition, trainState.speed);
+    cameraController.update(trainState.position, trainState.direction, tunnelProximity);
     updateHUD(trainState.speed, skyState.dayTime);
 
     renderer.render(scene, camera);

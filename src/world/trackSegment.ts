@@ -15,6 +15,10 @@ export class TrackSegment {
   readonly startEndpoint: SegmentEndpoint;
   readonly endEndpoint: SegmentEndpoint;
   readonly arcLength: number;
+  // Populated by terrain module after construction (see createSegmentTerrain).
+  // Each entry is a [startT, endT] range in [0,1] curve parameter space where
+  // the track is considered "inside a tunnel" (terrain above track + portal extension).
+  tunnelRegions: Array<{ startT: number; endT: number }> = [];
 
   private static readonly RAIL_GAUGE = 1.2;
   private static readonly SEGMENTS = 80;

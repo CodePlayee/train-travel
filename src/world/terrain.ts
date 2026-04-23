@@ -152,6 +152,7 @@ export function createSegmentTerrain(
 
   // Detect tunnel regions (continuous 10m+ of terrain above track by >5m)
   const tunnelRegions = detectTunnelRegions(segment, trackHeights, naturalHeightsAtTrack, SAMPLES_ALONG);
+  segment.tunnelRegions = tunnelRegions;
 
   const mat = getTerrainMaterial();
 

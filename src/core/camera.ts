@@ -7,7 +7,7 @@ export class CameraController {
     private input: InputManager,
   ) {}
 
-  update(trainPos: THREE.Vector3, trainDir: THREE.Vector3): void {
+  update(trainPos: THREE.Vector3, trainDir: THREE.Vector3, tunnelProximity = 0): void {
     let targetPos: THREE.Vector3;
     let lookAt: THREE.Vector3;
 
@@ -45,6 +45,20 @@ export class CameraController {
         targetPos = this.camera.position.clone();
         lookAt = trainPos.clone();
       }
+    }
+
+    // Tunnel override: blend toward cab view so the camera doesn't punch through
+    // mountain meshes when train enters/exits tunnels.
+    const blend = this.input.cameraMode === 2 ? 0 : tunnelProximity;
+    if (blend > 0) {
+      const cabPos = trainPos.clone()
+        .add(trainDir.clone().multiplyScalar(1.5))
+        .add(new THREE.Vector3(0, 2.3, 0));
+      const cabLook = trainPos.clone()
+        .add(trainDir.clone().multiplyScalar(20))
+        .add(new THREE.Vector3(0, 2, 0));
+      targetPos.lerp(cabPos, blend);
+      lookAt.lerp(cabLook, blend);
     }
 
     this.camera.position.lerp(targetPos, 0.05);
