@@ -7,6 +7,8 @@ import { TrackManager } from './world/trackManager';
 import { SkySystem } from './world/sky';
 import { TrainController } from './train/train';
 import { updateHUD } from './hud';
+import { audio } from './audio/audioSystem';
+import { Horn } from './audio/horn';
 
 // --- Debug wireframe (G key) ---------------------------------------------
 // Per-mesh-name color table. Anything not listed falls back to grey wireframe.
@@ -88,6 +90,26 @@ function init(): void {
   const trackManager = new TrackManager(scene);
   const train = new TrainController(scene);
   const sky = new SkySystem(scene, sunLight, ambientLight, renderer);
+
+  // Audio: only the horn now. Constructed up-front but cannot make sound
+  // until audio.enable() is called from a user gesture (browser autoplay
+  // policy). The first click/keydown handler below kicks that off.
+  const horn = new Horn(audio);
+
+  const enableOnce = (): void => {
+    audio.enable();
+    window.removeEventListener('click', enableOnce);
+    window.removeEventListener('keydown', enableOnce);
+  };
+  window.addEventListener('click', enableOnce);
+  window.addEventListener('keydown', enableOnce);
+
+  // M: mute (50ms ramp on master gain handles the click).
+  // H: manually trigger horn.
+  window.addEventListener('keyup', (e) => {
+    if (e.code === 'KeyM') audio.setMuted(!audio.muted);
+    else if (e.code === 'KeyH') horn.honk();
+  });
 
   // Hide loading
   const loadingEl = document.getElementById('loading');
@@ -230,6 +252,16 @@ function init(): void {
     const tunnelProximity = trackManager.getTunnelProximity(trainState.trackPosition, trainState.speed);
     (window as unknown as { __debug: { inTunnel: () => number } }).__debug.inTunnel = () => tunnelProximity;
     cameraController.update(trainState.position, trainState.direction, tunnelProximity);
+
+    // Auto-horn on tunnel approach: longer ramp than the camera one so the
+    // honk fires ~150m ahead (advance warning), well before the camera blend
+    // begins. Horn debounces internally on rising edge + cooldown.
+    const approachProximity = trackManager.getTunnelProximity(
+      trainState.trackPosition,
+      trainState.speed,
+      { rampSeconds: 6, minRamp: 100, maxRamp: 250 },
+    );
+    horn.updateAuto(approachProximity);
 
     // Drive tunnel-portal point lights. Recompute the dawn/dusk night ramp
     // here (mirrors updateHeadlight in train.ts:283-295) — extracting it
